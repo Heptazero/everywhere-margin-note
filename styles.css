@@ -1,0 +1,62 @@
+.margin-notes-layer {
+	position: absolute;
+	top: 0;
+	width: 200px;
+	/* Layer itself must not eat clicks in the margin; boxes re-enable. */
+	pointer-events: none;
+}
+
+.margin-notes-box {
+	position: absolute;
+	left: 12px;
+	width: 176px;
+	box-sizing: border-box;
+	padding: 4px 6px;
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--text-muted);
+	background: var(--background-primary);
+	border-left: 2px solid var(--interactive-accent);
+	border-radius: 2px;
+	box-shadow: 0 0 0 1px var(--background-modifier-border);
+	word-break: break-word;
+	cursor: text;
+	pointer-events: auto;
+}
+
+/* Edit mode: plain source text, preserve newlines the user types. */
+.margin-notes-box.is-editing {
+	white-space: pre-wrap;
+	color: var(--text-normal);
+}
+
+.margin-notes-box:focus {
+	outline: none;
+	box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+.margin-notes-box:empty::before {
+	content: attr(data-placeholder);
+	color: var(--text-faint);
+	font-style: italic;
+}
+
+/* Rendered-Markdown compactness inside the narrow box. */
+.margin-notes-box p {
+	margin: 0;
+}
+.margin-notes-box p + p {
+	margin-top: 0.4em;
+}
+.margin-notes-box ul,
+.margin-notes-box ol {
+	margin: 0.2em 0;
+	padding-inline-start: 1.2em;
+}
+
+/* Wide math (display blocks) scrolls inside the box instead of overflowing. */
+.margin-notes-box mjx-container {
+	overflow-x: auto;
+	overflow-y: hidden;
+	max-width: 100%;
+}
