@@ -45,11 +45,11 @@ export class PdfAnnotationSettingTab extends PluginSettingTab {
 		containerEl.createEl("h3", { text: "外观" });
 
 		new Setting(containerEl)
-			.setName("轨道宽度(px)")
-			.setDesc("固定到侧边轨道的批注共用这个宽度。也可以直接拖批注框朝向页面那一侧的边来改。")
+			.setName("轨道宽度")
+			.setDesc("固定到侧边轨道的批注共用这个宽度。也可以直接拖批注框的左右任意一条边来改。单位是 PDF 点(100% 缩放时的像素),会跟着页面一起缩放。")
 			.addSlider((s) =>
 				s
-					.setLimits(110, 400, 10)
+					.setLimits(50, 500, 5)
 					.setValue(settings.railWidth)
 					.setDynamicTooltip()
 					.onChange((v) => {
@@ -60,10 +60,10 @@ export class PdfAnnotationSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("基准字号(px)")
-			.setDesc("轨道批注固定用这个字号;自由摆放的便利贴以此为基准跟着 PDF 缩放。单条批注可以右键单独调。")
+			.setDesc("100% 缩放时的字号,所有批注都以此为基准跟着 PDF 一起缩放。单条批注可以用它自己的菜单再单独调。")
 			.addSlider((s) =>
 				s
-					.setLimits(9, 20, 1)
+					.setLimits(6, 28, 1)
 					.setValue(settings.fontSize)
 					.setDynamicTooltip()
 					.onChange((v) => {

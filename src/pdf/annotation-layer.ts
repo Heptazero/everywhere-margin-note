@@ -10,7 +10,14 @@ import { findScrollAncestor } from "./scroll-container";
 const LAYER_CLASS = "margin-notes-pdf-layer";
 const MIN_GAP = 8;
 const RAIL_GAP = 8;
-const MIN_RAIL_WIDTH_PT = 130;
+/** Floors, in PDF points. Kept genuinely small — these are a "don't collapse to
+ * nothing" guard, not a taste judgement about how narrow a note may be. They
+ * must stay <= the settings sliders' minimums, or the bottom of a slider
+ * silently does nothing (which is exactly what a 130 floor under a 110 slider
+ * used to do). */
+const MIN_RAIL_WIDTH_PT = 50;
+const MIN_FREE_WIDTH_PT = 40;
+const MIN_HEIGHT_PX = 20;
 const REBUILD_DEBOUNCE_MS = 60;
 
 /** Page geometry in scroll-container coordinates, plus the pt→px zoom factor. */
@@ -345,7 +352,7 @@ export class AnnotationLayer {
 	}
 
 	private scaleFont(pdfPath: string, ann: PdfAnnotation, delta: number): void {
-		this.mutate(pdfPath, ann, (a) => (a.fontScale = Math.max(0.5, Math.min(3, (a.fontScale ?? 1) + delta))));
+		this.mutate(pdfPath, ann, (a) => (a.fontScale = Math.max(0.3, Math.min(4, (a.fontScale ?? 1) + delta))));
 	}
 
 	/** Opens the OS colour picker via a throwaway `<input type=color>` — the same
@@ -525,13 +532,17 @@ export class AnnotationLayer {
 	}
 
 	/**
-	 * Resize handle on the box's inner edge. For a free note it sets that note's
-	 * own width/height (in page-percent, so it keeps its size across zoom); for
-	 * a pinned note it sets the shared RAIL width, since every note in a rail
-	 * has to agree on one — that is the "adjust the track's width" affordance.
-	 * The dragged px width is converted back to page points (÷ current zoom)
-	 * before saving, so the rail keeps looking the size the user chose as the
-	 * PDF is zoomed afterward, instead of reverting to a stale reference size.
+	 * Resize handles on BOTH vertical edges (plus a bottom-right corner for free
+	 * notes) — a normal resizable box, rather than the single page-facing edge
+	 * this used to have. Whichever edge is grabbed follows the cursor; for the
+	 * left edge that means moving `left` as the width changes, or the box
+	 * appears to resize from its opposite side.
+	 *
+	 * A free note stores its own width/height as page-percent; a pinned note
+	 * writes the shared RAIL width instead, since every note in a rail has to
+	 * agree on one. The dragged px width is converted back to page points
+	 * (÷ current zoom) before saving, so the rail keeps the size the user chose
+	 * as the PDF is zoomed afterwards.
 	 */
 	private attachResize(
 		handle: AnnotationBoxHandle,
@@ -540,10 +551,7 @@ export class AnnotationLayer {
 		pageView: PDFPageView,
 		railWidthPt: number
 	): void {
-		const grip = handle.el.createDiv(`margin-notes-pdf-resize is-${ann.pinned ? "rail" : "free"}`);
-		grip.setAttribute("aria-label", ann.pinned ? "拖动调整轨道宽度" : "拖动调整大小");
-
-		grip.addEventListener("pointerdown", (ev) => {
+		const beginResize = (edge: "left" | "right" | "corner") => (ev: PointerEvent) => {
 			ev.preventDefault();
 			ev.stopPropagation();
 			const startX = ev.clientX;
@@ -552,42 +560,55 @@ export class AnnotationLayer {
 			const startH = handle.el.offsetHeight;
 			const startLeft = parseFloat(handle.el.style.left || "0");
 			const zoom = this.currentPageBox(pageView)?.zoom ?? 1;
-			const minWidthPx = ann.pinned ? MIN_RAIL_WIDTH_PT * zoom : 60;
+			const minWidthPx = (ann.pinned ? MIN_RAIL_WIDTH_PT : MIN_FREE_WIDTH_PT) * zoom;
 			handle.el.addClass("is-dragging");
 
-			// The grip sits on the edge facing the page: the LEFT edge for a
-			// right-hand rail, the RIGHT edge for a left-hand one. That edge has to
-			// track the cursor — only growing `width` (with `left` pinned) made a
-			// right-hand rail appear to resize from its far side instead.
-			const grabsLeftEdge = ann.pinned && ann.side === "right";
-			const widthAt = (x: number) => Math.max(minWidthPx, startW + (grabsLeftEdge ? startX - x : x - startX));
+			const grabsLeft = edge === "left";
+			const widthAt = (x: number) => Math.max(minWidthPx, startW + (grabsLeft ? startX - x : x - startX));
+			const heightAt = (y: number) => Math.max(MIN_HEIGHT_PX, startH + (y - startY));
 
 			const onMove = (m: PointerEvent) => {
 				const w = widthAt(m.clientX);
 				handle.el.style.width = `${w}px`;
-				if (grabsLeftEdge) handle.el.style.left = `${startLeft + (startW - w)}px`;
-				if (!ann.pinned) handle.el.style.height = `${Math.max(28, startH + (m.clientY - startY))}px`;
+				if (grabsLeft) handle.el.style.left = `${startLeft + (startW - w)}px`;
+				if (edge === "corner") handle.el.style.height = `${heightAt(m.clientY)}px`;
 			};
 			const onUp = (u: PointerEvent) => {
 				window.removeEventListener("pointermove", onMove);
 				handle.el.removeClass("is-dragging");
 				const w = widthAt(u.clientX);
+
 				if (ann.pinned) {
 					const widthPt = Math.round(w / zoom);
 					if (widthPt !== Math.round(railWidthPt)) this.saveSettings({ railWidth: widthPt });
 					else this.refresh();
 					return;
 				}
+
 				const box = this.currentPageBox(pageView);
 				if (!box) return;
+				const newLeft = grabsLeft ? startLeft + (startW - w) : startLeft;
 				this.mutate(pdfPath, ann, (a) => {
 					a.freeW = (w / box.width) * 100;
-					a.freeH = (Math.max(28, startH + (u.clientY - startY)) / box.height) * 100;
+					// Growing leftwards moves the note too — keep its right edge put.
+					if (grabsLeft) a.freeX = ((newLeft - box.left) / box.width) * 100;
+					if (edge === "corner") a.freeH = (heightAt(u.clientY) / box.height) * 100;
 				});
 			};
 			window.addEventListener("pointermove", onMove);
 			window.addEventListener("pointerup", onUp, { once: true });
-		});
+		};
+
+		for (const edge of ["left", "right"] as const) {
+			const grip = handle.el.createDiv(`margin-notes-pdf-resize is-edge is-${edge}`);
+			grip.setAttribute("aria-label", ann.pinned ? "拖动调整轨道宽度(两边都可以拖)" : "拖动调整宽度");
+			grip.addEventListener("pointerdown", beginResize(edge));
+		}
+		if (!ann.pinned) {
+			const corner = handle.el.createDiv("margin-notes-pdf-resize is-corner");
+			corner.setAttribute("aria-label", "拖动调整大小");
+			corner.addEventListener("pointerdown", beginResize("corner"));
+		}
 	}
 
 	/**

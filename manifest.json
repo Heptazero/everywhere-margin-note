@@ -1,7 +1,7 @@
 {
 	"id": "margin-notes-hz",
 	"name": "Margin Notes (hz)",
-	"version": "0.5.1",
+	"version": "0.5.2",
 	"minAppVersion": "1.5.8",
 	"description": "Footnote definitions rendered as an editable right-margin sidenote, scroll-synced with the main text, with collision avoidance for closely-spaced references. Also supports floating and side-margin annotations anchored to PDF selections.",
 	"author": "heptazero",

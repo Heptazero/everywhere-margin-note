@@ -223,43 +223,53 @@
 	cursor: grabbing;
 }
 
-/* Resize handle. A rail note resizes the shared rail (horizontal only, on the
-   edge facing the page); a free note resizes itself from the bottom-right. */
+/* Resize handles: both vertical edges (rail width, or a free note's width) plus
+   a bottom-right corner on free notes. They must sit fully INSIDE the box —
+   the note is `overflow: hidden`, so the old `left: -2px` handle was partly
+   clipped, which is a good part of why nobody could find it to drag. A tinted
+   sliver appears on note-hover so the affordance is visible at all. */
 .margin-notes-pdf-resize {
 	position: absolute;
 	pointer-events: auto;
+	opacity: 0;
+	transition: opacity 0.1s;
 }
-.margin-notes-pdf-resize.is-rail {
+.margin-notes-pdf-resize.is-edge {
 	top: 0;
 	bottom: 0;
-	width: 6px;
+	width: 7px;
 	cursor: ew-resize;
+	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
 }
-.margin-notes-pdf-note[data-side="right"] .margin-notes-pdf-resize.is-rail {
-	left: -2px;
+.margin-notes-pdf-resize.is-left {
+	left: 0;
 }
-.margin-notes-pdf-note[data-side="left"] .margin-notes-pdf-resize.is-rail {
-	right: -2px;
+.margin-notes-pdf-resize.is-right {
+	right: 0;
 }
-.margin-notes-pdf-resize.is-rail:hover {
-	background: var(--margin-notes-pdf-rail-color, var(--interactive-accent));
-	opacity: 0.5;
+.margin-notes-pdf-note:hover .margin-notes-pdf-resize.is-edge {
+	opacity: 0.22;
 }
-.margin-notes-pdf-resize.is-free {
+.margin-notes-pdf-note .margin-notes-pdf-resize.is-edge:hover {
+	opacity: 0.75;
+}
+.margin-notes-pdf-resize.is-corner {
 	right: 0;
 	bottom: 0;
-	width: 12px;
-	height: 12px;
+	width: 13px;
+	height: 13px;
 	cursor: nwse-resize;
 	background: linear-gradient(
 		135deg,
 		transparent 0 50%,
-		var(--margin-notes-pdf-free-color, var(--interactive-accent)) 50% 100%
+		var(--margin-notes-pdf-note-color, var(--margin-notes-pdf-free-color, var(--interactive-accent))) 50% 100%
 	);
-	opacity: 0;
 }
-.margin-notes-pdf-note:hover .margin-notes-pdf-resize.is-free {
-	opacity: 0.6;
+.margin-notes-pdf-note:hover .margin-notes-pdf-resize.is-corner {
+	opacity: 0.65;
+}
+.margin-notes-pdf-note .margin-notes-pdf-resize.is-corner:hover {
+	opacity: 1;
 }
 
 /* Render/edit surface. Rendered Markdown normally; plain source while editing. */
