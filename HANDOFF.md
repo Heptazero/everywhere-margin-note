@@ -102,3 +102,217 @@ Enter 或点别处提交(写回文档底部 `[^id]: ...` 行)后切回渲染态,
 - `el.innerText.replace(/ /g, " ")` 里的 ` ` 必须写成显式转义,不能指望编辑器
   /终端正确处理字面 NBSP 字符——本次重建时手滑漏打字面 NBSP 导致正则变成 `/ /g` 的空操作,
   一开始没发现
+
+## Phase 5:PDF 便利贴批注,2026-08-16(v0.4.0)
+
+在 Phase 1-4 的脚注边注渲染之外,新增一套独立功能:在 PDF 上写批注,不经过笔记文件、
+不走 wikilink 反链系统,是"锚定在某页某处的一张本地便利贴"。和脚注渲染共用
+`src/collision-avoidance.ts`。
+
+### 核心模型:一种东西,两个正交开关
+
+早期版本用 `kind: "floating" | "margin"` 区分两种批注,**这是个设计错误**——它把两个
+互相独立的维度硬捆在一起,导致"悬浮的永远是点、侧边的永远是展开"。v0.4.0 拆成:
+
+|            | `collapsed: false` | `collapsed: true` |
+|------------|--------------------|-------------------|
+| `pinned: true`  | 侧边轨道里的框 | 轨道里的一个点 |
+| `pinned: false` | 自由摆放的便利贴 | 页面上的一个点 |
+
+四格都有意义,随时可以互相切换(框上的工具条 / 右键菜单)。`normalizeAnnotation()`
+负责把旧记录升级:`floating` → free+collapsed,`margin` → rail+expanded。
+
+### 数据存哪里
+
+库内一个 JSON 文件,路径可在设置里改,默认 `.margin-notes-hz/`。
+**不放插件自己的 `data.json`**:本库 `.gitignore` 排除了整个 `/.obsidian/plugins/`,
+放那儿的批注不会进 git;Obsidian Sync 也把插件数据当成要单独勾选的类别。
+
+**踩过的坑**:路径设置最初只当文件路径处理,用户照着旁边 `branch-timeline` 的样子填了
+`99_assets/plugin-data/margin-note`(明显是想要文件夹),结果那里被建成空目录、批注根本
+没写进去,还留在旧位置。现在 `resolveDataFilePath()` 会判断:以 `.json` 结尾当文件,
+否则当文件夹、在里面放 `annotations.json`。设置页会实时显示"实际文件:<路径>"。
+
+```ts
+interface PdfAnnotation {
+	id: string; page: number;
+	anchor: PdfRect;              // 指向哪 —— PDF point,来自选区/框选
+	pinned: boolean;              // 在轨道里 or 自由摆放
+	collapsed: boolean;           // 收成点 or 展开
+	side: "left" | "right";       // 哪条轨道
+	freeX?, freeY?, freeW?, freeH?;  // 自由摆放:页面百分比(可为负/超 100 = 页面外)
+	offsetY?: number;             // 轨道:手动上下微调(px)
+	fontScale?: number;           // 单条字号倍率
+	text: string;                 // Markdown 源码
+	createdAt, updatedAt: number;
+}
+```
+
+**为什么自由坐标用百分比而不是像素**:百分比是相对页面框的,缩放时便利贴自动跟着页面走,
+不会跑飞;而且允许 <0 或 >100,天然表达"贴在页面左右外面的空白里"。
+**为什么 `offsetY` 和 `anchor` 分开**:`anchor` 永远表示"指着原文哪里",`offsetY` 表示
+"用户想让框显示在哪",混在一起的话以后做重新锚定/导出引用原文时锚点已被拖动污染。
+
+### 定位:两条踩过的坑
+
+**1. 轨道必须钉在可视区,不能钉在页面边。** 最初 `left = pageRight + GAP`,PDF 放大到
+填满窗格时轨道就跑到视口外面,只能缩到很小才看得见。现在:
+```
+右轨道 left = min(页面右边 + GAP, 可视右边 - 轨道宽 - GAP)
+左轨道 left = max(页面左边 - 轨道宽 - GAP, 可视左边 + GAP)
+```
+留白够就贴着页面(离正文近好读),不够就压到页面上,**永远可见**。
+
+**2. 轨道批注固定 px,自由便利贴跟着缩放。** 轨道是 UI chrome,尺寸应该屏幕固定,否则
+PDF 缩小时批注框会相对页面越来越大、喧宾夺主(用户原话:"无论我缩多小这个就跟着放大")。
+自由便利贴是"贴在纸上的",宽高字号都随页面缩放。字号:轨道 = `fontSize`,
+自由 = `fontSize × zoom`,各自再乘 `fontScale`。
+
+**3. 只有一个层,不再分两层。** 早期悬浮批注画在 `getOverlayLayer()` 的页内覆盖层里,
+那层 `overflow: hidden`,导致便利贴一旦放到页面外就被裁掉——这正好挡死了"放在左右空白处"
+这个核心需求。现在所有批注(包括点)都画在滚动容器下的**同一个层**里,位置由页面
+`getBoundingClientRect()` 换算,`overflow` 不再裁任何东西。页内覆盖层现在只剩框选时
+画虚线框在用。
+
+### 代码结构(`src/pdf/`)
+
+- `pdfjs-types.ts` / `pdf-layer.ts` / `selection-geom.ts` / `rect-select.ts` ——
+  **从 `everything-bilink/src/` 原样镜像**(不抽共享包,理由见文件头注释)。以后 Obsidian
+  升级打断这条未公开内部链路,**两个插件都要改**。
+- `annotation-types.ts` —— 数据模型 + `normalizeAnnotation()` 旧记录升级。
+- `annotation-store.ts` —— 持久化、debounce 落盘、路径解析、PDF 改名跟随
+  (`renameFile` 挂 `vault.on("rename")`;纯路径 key 否则文件一移动批注就悄悄丢)、
+  多级迁移(新路径 → 旧默认文件夹 → 更旧的插件 data.json)。JSON 坏了**抛错不清空**。
+- `annotation-anchor.ts` —— 文字选区 → 锚点矩形。是 `everything-bilink` 的
+  `text-select-copy.ts::readActiveSelection` 简化版:只要几何不要文字,所以没有公式回填。
+- `annotation-box.ts` —— 框壳。显示态走 `MarkdownRenderer.render`(LaTeX/双链/加粗全支持,
+  和脚注框同一套管线);点击切源码 contentEditable,blur/Enter 提交、Esc 放弃。
+  **渲染出的 `a.internal-link` 自己挂了 `openLinkText`**——Obsidian 只在它自己的视图里
+  接管这类点击;点链接跳转、点别处进编辑,靠 `closest("a")` 区分。
+- `annotation-layer.ts` —— 唯一的渲染层,前面那三条定位逻辑都在这。工具条:拖动柄 /
+  切换左右轨道 / 钉住↔自由 / 收起成点 / 删除;右键菜单额外有字号增减、恢复自动高度。
+  轨道批注的 resize 手柄拖的是**共享的轨道宽度**(存进设置),自由便利贴拖的是自己的宽高。
+- `annotation-list-view.ts` —— 右侧栏面板,按页码+页面纵向位置列出全部批注(渲染 Markdown),
+  点击跳到那页并闪烁。
+- `controller.ts` —— 扫描 PDF 视图、每视图一份 `ViewState`、命令入口。**批注初始形态由
+  调用的命令决定**(之后随时可改),不解析笔记语法猜。
+
+### 命令 / 入口
+
+- `[PDF] 加批注:右侧轨道` / `左侧轨道` / `自由摆放(便利贴)`
+- `[PDF] 打开批注列表面板`(另有 ribbon 图标)
+
+有选中文字就直接锚上去;没选中就提示拖一个框标出位置(这就是"框选",之前完全没提示,
+用户反馈看不懂)。
+
+### 验证状态
+
+- **已验证(headless)**:store 层 15 个用例(路径解析文件/文件夹两种写法、旧
+  `kind` 迁移、旧位置迁移、新字段往返、损坏文件抛错、upsert/remove/forPage、
+  renameFile 合并、onChange 订阅);`npm run build` 干净。测试脚本在会话 scratchpad,未入库。
+- **完全没验证**:所有交互——拖动、缩放、钉住/自由切换、收起展开、轨道宽度拖拽、
+  字号右键调整、Markdown/LaTeX/双链渲染与跳转、列表跳转闪烁、
+  `findScrollAncestor` 是否真找到 pdf.js 的滚动祖先。
+
+### v0.4.1 修的几个 UI bug(用户实测反馈)
+
+1. **字号没有入口** —— 只做在右键菜单里,没人找得到。现在工具条直接放了 A−/A+,
+   外加一个 `⋯` 按钮打开同一个菜单(右键菜单保留)。按钮缩到 15px 才塞得下 7 个,
+   `MIN_RAIL_WIDTH` 相应提到 130。
+2. **右侧轨道的缩放手柄拖起来像在拖右边** —— 手柄位置本来就对(在朝向页面那一侧),
+   但拖动时只改了 `width`、没改 `left`,而右轨道的 `left` 是固定的,于是框往右长,
+   看着就像在拖另一边。现在被抓住的那条边跟着鼠标走(`grabsLeftEdge` 时同步改 `left`)。
+3. **缩放后批注漂移(滚动不漂)** —— 两个原因叠加:pdf.js 缩放时会**每页**发一次
+   `pagerendered`,每次都触发 rebuild,而那时其他页还没重新排版完,量到的是旧矩形;
+   而且原来的实现在 `await` Markdown 渲染**之前**就把几何量好了,渲染完直接用旧数字定位。
+   现在 rebuild 有 60ms 防抖合并这一串事件,并且拆成 `layout()` 独立函数,**渲染前后各
+   跑一次**——第二次重新测量当前页面矩形。拖动结束时也改成现场重新量页面框,
+   而不是用建框时捕获的那份。
+4. **批注面板点了没反应、只显示"当前没有打开的 PDF"** —— 根因:面板一被点击就成了
+   "活动视图",`getActivePDFView()` 当场返回 null。现在 controller 记住
+   `lastPdfView`(还开着才算数),面板和跳转都用它;面板自身获得焦点时跳过重渲染。
+   跳转也改成复用 PDF 已在的那个 leaf(`setState` 带 `#page=`),不再在侧边栏旁边
+   另开一份。
+5. 面板底部换成 `--background-primary` 并 `min-height: 100%`,不再露出侧边栏那层
+   不同底色的色带。
+
+### v0.5.0 —— 重新定义"固定",加颜色/纯文字样式,批注面板可编辑跳转(用户实测反馈)
+
+**1. "固定"的语义反了,推翻重做。** 0.4.x 把"固定"实现成屏幕固定尺寸的 UI chrome
+(不随 PDF 缩放变化)。用户纠正:这不是他们的原意——"固定"应该和便签("自由"那种)
+一样贴在 PDF 上、随缩放等比例变化,唯一的区别只是**横向被限制在左右两条轨道里**,
+不能随便摆。现在 `PageBox` 多存了 `ptX0/ptX1/ptWidth`,`settings.railWidth` 的语义
+从"px"改成"PDF point(100% 缩放时的 px)",渲染时统一 `* box.zoom` 换算成当前
+屏幕像素——轨道宽度、批注宽度、字号,固定和自由现在走同一套缩放公式,只有 X 坐标的
+算法不同(轨道用 `railLeft()` 卡边,自由用 `freeX/freeY` 百分比)。拖轨道内边缘调宽度时
+落盘前除以当前 zoom,换回"point"存,保证以后缩放时视觉宽度还是用户当时选的那个。
+
+**2. 批注面板:分页折叠 + 面板内直接编辑/删除 + 跳转带高亮。**
+`annotation-list-view.ts` 整个重写:
+- 按页码分组,每组一个可折叠 header(点头部展开/收起,状态存在 view 实例上,
+  面板关闭重开会重置——这是会话态,不值得落盘)。
+- **每一行直接复用 `buildAnnotationBox`**(和页面上的批注同一个组件),而不是只读的
+  `MarkdownRenderer.render`——所以面板里点正文能直接编辑,工具条上有跳转和删除两个
+  按钮,不用打开 PDF 就能改/删批注。
+- 跳转(`revealAnnotation` → `AnnotationLayer.reveal()`)除了闪一下批注框本身,
+  现在还会在**原文锚点位置**画一个临时高亮矩形并 `scrollIntoView`——批注框自己在轨道里
+  或者被拖到别处,并不代表那就是原文位置,用户要看到的是"这条批注指的到底是哪句话"。
+
+**3. 颜色 + 纯文字样式,工具条压缩成一个"⋯"。**
+`PdfAnnotation` 加了 `color?` 和 `style?: "boxed" | "plain"` 两个可选字段。
+页面上批注框原来的工具条有 6 个图标(字号±、固定、收起、更多、删除)当场就把短批注的
+文字糊住了——现在压缩成**只有拖动柄 + 一个"⋯"**,点开是同一个右键菜单(菜单本身没删减,
+新增了"改成纯文字样式"和"更改颜色…"两项)。颜色用一个隐藏的原生
+`<input type=color>` 触发系统取色器(和设置页 `addColorPicker` 背后是同一套机制),
+选完立即生效、离开自动清理。纯文字样式去掉边框/背景/阴影,只剩带色文字,悬停或编辑时
+临时露出一个底,方便点回去编辑。
+
+### v0.5.1 —— 三个真 bug(用户实测反馈)
+
+1. **批注面板点击跳转,静默失败。** `revealAnnotation` 对已经打开的 PDF leaf 调用了
+   `view.setState({file, subpath}, ...)`——这是错的:`setState()` 是每种 View 自己的
+   **持久化状态**格式,FileView 不认得 `{file, subpath}` 这个形状,调用直接是静默空操作。
+   导航一个**已经打开**的文件到某个 subpath,正确 API 是 `View.setEphemeralState()`
+   (`MarkdownView` 跳转到标题/块引用用的就是这个)。改用
+   `existing.view.setEphemeralState({ subpath: "#page=N" })` 后修复。
+2. **新建的自由便利贴默认出现在页面外面。** `freeXPct` 默认值原来写死 102%(页面右边缘
+   往外一点点),不管选区在哪——页面在阅读器窗口里贴得紧、没什么留白的时候,这个位置
+   经常落在可视区域外面,便利贴创建了但看不见。改成默认贴着**选区右边**
+   (锚点右边缘 + 3%),不再存成固定值——因为只在 `freeX` 未设置时才用这个默认公式,
+   每次渲染都重新按锚点算,不会像存死的 102% 那样"一直错在同一个地方"。
+   `togglePin` 解除固定时也不再写死跳到 102%/-30% 的角落,同样交给这个默认公式,
+   于是解除固定也会自然落在原来那条批注所在的位置附近。
+3. **固定轨道拖宽度,拖一点就卡住。** 根因不在 resize 的算法本身,而在防抖:
+   `rebuild()` 只在**调度**这次重建的那一刻检查了 `isBusy()`(是否有框正在编辑/拖拽),
+   但 60ms 后真正执行的 `doRebuild()` 并不会再检查一遍——如果调度和执行之间用户开始拖动
+   (很容易发生,比如拖拽引发的滚动会让 `onTextLayerReady` 再触发一次调度),
+   `doRebuild()` 照样把整个层 `layer.empty()` 清空重建,用户手指下面那个 DOM 元素被换掉,
+   但 `pointermove` 监听器还挂在 `window` 上继续触发,改的是一个已经不在文档里的旧元素
+   ——看起来就是"拖一点就死了"。现在 `doRebuild()` 一开始、以及 Markdown 渲染
+   `await` 结束后都会重新检查 `isBusy()`,忙碌就直接放弃这一轮(拖拽/编辑结束时的
+   `refresh()` 会补上)。
+
+### epub(讨论,未实现)
+
+用户确认了 epub 的批注模型:选中文字 → 加批注(没有页码/PDF 坐标概念,只有 DOM 里的
+文字位置);点击高亮 → 显示批注;侧边栏同一套逻辑。这意味着 PDF 现在用的
+`anchor: PdfRect` 完全不适用于 epub,得换成文字引用锚点(`{quote, prefix, suffix}`,
+姐妹项目 `~/Documents/project/margin-notes-web/src/anchor.ts` 已经有实现可以照抄)。
+结构上可行——把"锚点→屏幕坐标"抽成接口,PDF/epub 各一个实现,便利贴/轨道/避让/渲染
+全部复用——但这是不小的重构,还没动手,等 PDF 这版彻底跑顺再说。
+
+### 还没做 / 下一步
+
+1. 上面"完全没验证"整节的真实 UI 验证
+2. **双链不进反链系统**——批注文字在 JSON 里,Obsidian 的 metadataCache 不解析它,
+   所以 `[[某某]]` 只是单向可点,目标笔记看不到反链、图谱也不连线。已和用户讨论过
+   改存 Markdown(一个 PDF 配一个批注 md,机器字段塞 HTML 注释)来彻底解决,
+   **这个决定还悬着,没做**
+3. epub 支持——见上面的讨论小节,数据模型需要一次不小的重构才能两边共用
+4. AI 写批注:当前 schema 对 AI 只读友好、写不友好(锚点是坐标,AI 推不出来)。
+   讨论过的方向是加 `quote`/`prefix`/`suffix` 文字锚点(姐妹项目
+   `~/Documents/project/margin-notes-web/src/anchor.ts` 已有同款实现可抄),
+   页码作为更粗的精度档兜底。**也还没做**
+5. `revealAnnotation` 用固定 350ms 等 pdf.js 渲染完目标页,不稳;应该改成监听一次
+   `pagerendered`
+6. 各页尺寸/旋转不一致的 PDF,轨道会左右跳(大多数 PDF 每页一致,真遇到再修)
