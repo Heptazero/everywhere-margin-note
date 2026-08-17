@@ -9,7 +9,12 @@ import { findScrollAncestor } from "./scroll-container";
 
 const LAYER_CLASS = "margin-notes-pdf-layer";
 const MIN_GAP = 8;
-const RAIL_GAP = 8;
+/** Gap between a page edge and its rail, in PDF points (scales with zoom). */
+const RAIL_GAP_PT = 10;
+/** Blank space kept past the outermost note, so it never sits under the viewer's scrollbar. */
+const OUTER_MARGIN_PX = 28;
+/** Keep in sync with `.margin-notes-pdf-dot`'s size in styles.css. */
+const DOT_SIZE_PX = 12;
 /** Floors, in PDF points. Kept genuinely small — these are a "don't collapse to
  * nothing" guard, not a taste judgement about how narrow a note may be. They
  * must stay <= the settings sliders' minimums, or the bottom of a slider
@@ -207,14 +212,9 @@ export class AnnotationLayer {
 		if (!scroller) return;
 
 		const scrollerRect = scroller.getBoundingClientRect();
-		// The rail must stay on screen. Anchoring purely to the page edge put it
-		// outside the viewport whenever the page was zoomed in far enough to fill
-		// the pane, so it could only be seen by zooming way back out.
-		const visibleLeft = scroller.scrollLeft;
-		const visibleRight = scroller.scrollLeft + scroller.clientWidth;
-
 		const boxes = new Map<PDFPageView, PageBox>();
 		const rails: Record<MarginSide, Rail[]> = { left: [], right: [] };
+		let maxRight = 0;
 
 		for (const item of built) {
 			if (!item.pageView.div.isConnected) continue;
@@ -228,18 +228,25 @@ export class AnnotationLayer {
 
 			if (ann.pinned) {
 				const railWidthPx = railWidthPt * box.zoom;
-				el.style.left = `${this.railLeft(ann.side, box, railWidthPx, visibleLeft, visibleRight)}px`;
+				const left = this.railLeft(ann.side, box, railWidthPx);
+				el.style.left = `${left}px`;
 				if (!ann.collapsed) {
 					el.style.width = `${railWidthPx}px`;
 					el.style.fontSize = `${fontPx}px`;
+					maxRight = Math.max(maxRight, left + railWidthPx);
+				} else {
+					maxRight = Math.max(maxRight, left + DOT_SIZE_PX);
 				}
 				rails[ann.side].push({ id: ann.id, top: this.anchorTop(ann, box), height: 0, el });
 			} else if (ann.collapsed) {
-				el.style.left = `${box.left + (this.freeXPct(ann, box) / 100) * box.width}px`;
+				const left = box.left + (this.freeXPct(ann, box) / 100) * box.width;
+				el.style.left = `${left}px`;
 				el.style.top = `${box.top + (this.freeYPct(ann, box) / 100) * box.height}px`;
+				maxRight = Math.max(maxRight, left + DOT_SIZE_PX);
 			} else {
 				this.placeFree(el, ann, box);
 				el.style.fontSize = `${fontPx}px`;
+				maxRight = Math.max(maxRight, parseFloat(el.style.left) + parseFloat(el.style.width));
 			}
 		}
 
@@ -248,13 +255,34 @@ export class AnnotationLayer {
 			for (const r of group) r.height = r.el.offsetHeight;
 			for (const r of resolveCollisions(group, MIN_GAP)) r.el.style.top = `${r.top}px`;
 		}
+
+		// Give the layer a real width so the scroll container can actually reach
+		// the notes sitting past the page's right edge, with a margin of blank
+		// space beyond the outermost one — otherwise the rightmost note ends up
+		// flush against (and fighting with) the viewer's own scrollbar.
+		this.layer!.style.width = maxRight > 0 ? `${maxRight + OUTER_MARGIN_PX}px` : "";
 	}
 
-	/** Rail x (px): hug the page when there's gutter, slide onto the page rather than off screen. */
-	private railLeft(side: MarginSide, box: PageBox, railWidthPx: number, visibleLeft: number, visibleRight: number): number {
+	/**
+	 * Rail x, in scroll-container px.
+	 *
+	 * Purely page-relative — deliberately NOT clamped to the viewport. An earlier
+	 * version clamped against `scrollLeft + clientWidth` to keep the rail always
+	 * on screen, which broke three things at once: the rail drifted on zoom
+	 * (its position depended on scroll state, unlike free notes, which is exactly
+	 * why only the rail drifted); it could never sit out in the blank area past
+	 * the page; and it fed back on itself — a wider rail extends the scrollable
+	 * width, which moves `scrollLeft + clientWidth` further right, which moves
+	 * the rail further right, dragging the viewport along with it.
+	 *
+	 * The only clamp left is at the content origin: a left rail may not go
+	 * negative, since nothing can scroll left of 0 and it would be unreachable.
+	 */
+	private railLeft(side: MarginSide, box: PageBox, railWidthPx: number): number {
+		const gap = RAIL_GAP_PT * box.zoom;
 		return side === "right"
-			? Math.min(box.left + box.width + RAIL_GAP, visibleRight - railWidthPx - RAIL_GAP)
-			: Math.max(box.left - railWidthPx - RAIL_GAP, visibleLeft + RAIL_GAP);
+			? box.left + box.width + gap
+			: Math.max(0, box.left - railWidthPx - gap);
 	}
 
 	/** Vertical position derived from the anchor (plus any manual nudge). */
