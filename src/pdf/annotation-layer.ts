@@ -9,8 +9,6 @@ import { findScrollAncestor } from "./scroll-container";
 
 const LAYER_CLASS = "margin-notes-pdf-layer";
 const MIN_GAP = 8;
-/** Gap between a page edge and its rail, in PDF points (scales with zoom). */
-const RAIL_GAP_PT = 10;
 /** Blank space kept past the outermost note, so it never sits under the viewer's scrollbar. */
 const OUTER_MARGIN_PX = 28;
 /** Keep in sync with `.margin-notes-pdf-dot`'s size in styles.css. */
@@ -228,7 +226,7 @@ export class AnnotationLayer {
 
 			if (ann.pinned) {
 				const railWidthPx = railWidthPt * box.zoom;
-				const left = this.railLeft(ann.side, box, railWidthPx);
+				const left = this.railLeft(ann.side, box, railWidthPx, settings.railGap * box.zoom);
 				el.style.left = `${left}px`;
 				if (!ann.collapsed) {
 					el.style.width = `${railWidthPx}px`;
@@ -278,11 +276,10 @@ export class AnnotationLayer {
 	 * The only clamp left is at the content origin: a left rail may not go
 	 * negative, since nothing can scroll left of 0 and it would be unreachable.
 	 */
-	private railLeft(side: MarginSide, box: PageBox, railWidthPx: number): number {
-		const gap = RAIL_GAP_PT * box.zoom;
+	private railLeft(side: MarginSide, box: PageBox, railWidthPx: number, railGapPx: number): number {
 		return side === "right"
-			? box.left + box.width + gap
-			: Math.max(0, box.left - railWidthPx - gap);
+			? box.left + box.width + railGapPx
+			: Math.max(0, box.left - railWidthPx - railGapPx);
 	}
 
 	/** Vertical position derived from the anchor (plus any manual nudge). */
@@ -579,7 +576,98 @@ export class AnnotationLayer {
 		pageView: PDFPageView,
 		railWidthPt: number
 	): void {
-		const beginResize = (edge: "left" | "right" | "corner") => (ev: PointerEvent) => {
+		if (ann.pinned) this.attachRailResize(handle, ann, pageView, railWidthPt);
+		else this.attachFreeResize(handle, pdfPath, ann, pageView);
+	}
+
+	/**
+	 * A rail note's position is DERIVED (`railLeft()` = page edge + gap), not
+	 * stored — so its page-facing edge is pinned by the layout and simply
+	 * cannot be moved by changing the width. Dragging it used to look broken
+	 * for exactly that reason: the edge snapped back on release and the
+	 * opposite side grew instead.
+	 *
+	 * What makes both edges behave like a normal box is recognising that a rail
+	 * has TWO degrees of freedom, and each edge owns one:
+	 *   - outer edge (away from the page) → the rail's WIDTH
+	 *   - inner edge (facing the page)    → the rail's GAP from the page,
+	 *     with width compensating so the outer edge stays put
+	 * Both are shared settings, so dragging either on any one note re-flows
+	 * every note in that rail — which is the point of a rail.
+	 */
+	private attachRailResize(
+		handle: AnnotationBoxHandle,
+		ann: PdfAnnotation,
+		pageView: PDFPageView,
+		railWidthPt: number
+	): void {
+		// Which DOM edge faces the page depends on the side the rail is on.
+		const innerEdge = ann.side === "right" ? "left" : "right";
+
+		const begin = (edge: "left" | "right") => (ev: PointerEvent) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+			const box = this.currentPageBox(pageView);
+			if (!box) return;
+
+			const startX = ev.clientX;
+			const startW = handle.el.offsetWidth;
+			const startGapPx = this.getSettings().railGap * box.zoom;
+			const minWidthPx = MIN_RAIL_WIDTH_PT * box.zoom;
+			const isInner = edge === innerEdge;
+			// dx is measured rightwards; a left-hand rail mirrors every effect.
+			const sign = ann.side === "right" ? 1 : -1;
+			handle.el.addClass("is-dragging");
+
+			const solve = (x: number) => {
+				const dx = (x - startX) * sign;
+				// Inner edge: width grows as the edge moves toward the page, and the
+				// gap shrinks by the same amount so the outer edge stays put.
+				// Outer edge: width alone, gap untouched.
+				const width = Math.max(minWidthPx, isInner ? startW - dx : startW + dx);
+				const gap = isInner ? startGapPx + (startW - width) : startGapPx;
+				return { width, gap };
+			};
+
+			const onMove = (m: PointerEvent) => {
+				const { width, gap } = solve(m.clientX);
+				handle.el.style.width = `${width}px`;
+				handle.el.style.left = `${this.railLeft(ann.side, box, width, gap)}px`;
+			};
+			const onUp = (u: PointerEvent) => {
+				window.removeEventListener("pointermove", onMove);
+				handle.el.removeClass("is-dragging");
+				const { width, gap } = solve(u.clientX);
+				const widthPt = Math.round(width / box.zoom);
+				const gapPt = Math.round(gap / box.zoom);
+				if (widthPt !== Math.round(railWidthPt) || gapPt !== Math.round(this.getSettings().railGap)) {
+					this.saveSettings({ railWidth: widthPt, railGap: gapPt });
+				} else {
+					this.refresh();
+				}
+			};
+			window.addEventListener("pointermove", onMove);
+			window.addEventListener("pointerup", onUp, { once: true });
+		};
+
+		for (const edge of ["left", "right"] as const) {
+			const grip = handle.el.createDiv(`margin-notes-pdf-resize is-edge is-${edge}`);
+			grip.setAttribute(
+				"aria-label",
+				edge === innerEdge ? "拖动调整轨道离页面的距离" : "拖动调整轨道宽度"
+			);
+			grip.addEventListener("pointerdown", begin(edge));
+		}
+	}
+
+	/** A free note stores its own box, so both edges and the corner move it directly. */
+	private attachFreeResize(
+		handle: AnnotationBoxHandle,
+		pdfPath: string,
+		ann: PdfAnnotation,
+		pageView: PDFPageView
+	): void {
+		const begin = (edge: "left" | "right" | "corner") => (ev: PointerEvent) => {
 			ev.preventDefault();
 			ev.stopPropagation();
 			const startX = ev.clientX;
@@ -588,10 +676,10 @@ export class AnnotationLayer {
 			const startH = handle.el.offsetHeight;
 			const startLeft = parseFloat(handle.el.style.left || "0");
 			const zoom = this.currentPageBox(pageView)?.zoom ?? 1;
-			const minWidthPx = (ann.pinned ? MIN_RAIL_WIDTH_PT : MIN_FREE_WIDTH_PT) * zoom;
+			const minWidthPx = MIN_FREE_WIDTH_PT * zoom;
+			const grabsLeft = edge === "left";
 			handle.el.addClass("is-dragging");
 
-			const grabsLeft = edge === "left";
 			const widthAt = (x: number) => Math.max(minWidthPx, startW + (grabsLeft ? startX - x : x - startX));
 			const heightAt = (y: number) => Math.max(MIN_HEIGHT_PX, startH + (y - startY));
 
@@ -604,17 +692,9 @@ export class AnnotationLayer {
 			const onUp = (u: PointerEvent) => {
 				window.removeEventListener("pointermove", onMove);
 				handle.el.removeClass("is-dragging");
-				const w = widthAt(u.clientX);
-
-				if (ann.pinned) {
-					const widthPt = Math.round(w / zoom);
-					if (widthPt !== Math.round(railWidthPt)) this.saveSettings({ railWidth: widthPt });
-					else this.refresh();
-					return;
-				}
-
 				const box = this.currentPageBox(pageView);
 				if (!box) return;
+				const w = widthAt(u.clientX);
 				const newLeft = grabsLeft ? startLeft + (startW - w) : startLeft;
 				this.mutate(pdfPath, ann, (a) => {
 					a.freeW = (w / box.width) * 100;
@@ -629,14 +709,12 @@ export class AnnotationLayer {
 
 		for (const edge of ["left", "right"] as const) {
 			const grip = handle.el.createDiv(`margin-notes-pdf-resize is-edge is-${edge}`);
-			grip.setAttribute("aria-label", ann.pinned ? "拖动调整轨道宽度(两边都可以拖)" : "拖动调整宽度");
-			grip.addEventListener("pointerdown", beginResize(edge));
+			grip.setAttribute("aria-label", "拖动调整宽度");
+			grip.addEventListener("pointerdown", begin(edge));
 		}
-		if (!ann.pinned) {
-			const corner = handle.el.createDiv("margin-notes-pdf-resize is-corner");
-			corner.setAttribute("aria-label", "拖动调整大小");
-			corner.addEventListener("pointerdown", beginResize("corner"));
-		}
+		const corner = handle.el.createDiv("margin-notes-pdf-resize is-corner");
+		corner.setAttribute("aria-label", "拖动调整大小");
+		corner.addEventListener("pointerdown", begin("corner"));
 	}
 
 	/**

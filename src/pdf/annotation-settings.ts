@@ -25,6 +25,12 @@ export interface PdfAnnotationSettings {
 	 * makes that automatic. Drag a rail note's inner edge to change it.
 	 */
 	railWidth: number;
+	/**
+	 * Distance from the page's edge to the rail's inner edge, in PDF points.
+	 * May be negative, which parks the rail over the page instead of beside it.
+	 * Drag a rail note's page-facing edge to change it.
+	 */
+	railGap: number;
 	/** Base font size in px at 100% zoom. Every note scales this with the page's zoom. */
 	fontSize: number;
 }
@@ -35,6 +41,7 @@ export const DEFAULT_PDF_ANNOTATION_SETTINGS: PdfAnnotationSettings = {
 	railColor: "#eed37c",
 	opacity: 92,
 	railWidth: 220,
+	railGap: 10,
 	fontSize: 12,
 };
 

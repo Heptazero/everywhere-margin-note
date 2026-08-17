@@ -67,6 +67,14 @@ export class PdfAnnotationsController {
 			throw e;
 		}
 
+		// Any mutation from anywhere — including the list panel, which owns no
+		// layer of its own — has to reach the on-page rendering. Without this,
+		// deleting or editing a note in the panel updated the panel and the file
+		// but left the note sitting on the PDF until the next page render.
+		// (Layer rebuilds are debounced and skip while a note is being dragged or
+		// edited, so the extra churn from in-layer edits is harmless.)
+		this.plugin.register(this.store.onChange(() => this.rebuildAll()));
+
 		this.app.workspace.onLayoutReady(() => this.scanPDFViews());
 		this.plugin.registerEvent(this.app.workspace.on("layout-change", () => this.scanPDFViews()));
 		this.plugin.registerEvent(

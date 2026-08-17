@@ -44,9 +44,17 @@ export class PdfAnnotationSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h3", { text: "外观" });
 
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text:
+				"「固定」的批注不是自己记住位置,而是排在页面左右两条轨道里——所以轨道的宽度和" +
+				"离页面的距离是整条轨道共用的,改一条就是改这一侧的全部。单位都是 PDF 点" +
+				"(100% 缩放时的像素),会跟着页面一起缩放,不会因为你放大缩小而变形。",
+		});
+
 		new Setting(containerEl)
 			.setName("轨道宽度")
-			.setDesc("固定到侧边轨道的批注共用这个宽度。也可以直接拖批注框的左右任意一条边来改。单位是 PDF 点(100% 缩放时的像素),会跟着页面一起缩放。")
+			.setDesc("这一侧所有固定批注的宽度。也可以直接拖批注框远离页面那一侧的边。")
 			.addSlider((s) =>
 				s
 					.setLimits(50, 500, 5)
@@ -54,6 +62,20 @@ export class PdfAnnotationSettingTab extends PluginSettingTab {
 					.setDynamicTooltip()
 					.onChange((v) => {
 						settings.railWidth = v;
+						commit();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("轨道离页面的距离")
+			.setDesc("负数会把轨道压到页面上。也可以直接拖批注框朝向页面那一侧的边。")
+			.addSlider((s) =>
+				s
+					.setLimits(-200, 300, 5)
+					.setValue(settings.railGap)
+					.setDynamicTooltip()
+					.onChange((v) => {
+						settings.railGap = v;
 						commit();
 					})
 			);
