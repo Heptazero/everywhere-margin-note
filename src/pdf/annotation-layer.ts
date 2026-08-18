@@ -9,6 +9,22 @@ import type { PDFPageView } from "./pdfjs-types";
 import { resolveQuoteAnchor } from "./quote-anchor";
 import { findScrollAncestor } from "./scroll-container";
 
+/**
+ * Floors an x at the scroll container's origin. Nothing can scroll to a
+ * negative offset, so an element placed at x < 0 is not merely off-screen —
+ * it is permanently unreachable, no matter how far the user scrolls. The left
+ * rail has always been clamped this way; free notes were not, which is how a
+ * note dragged into the gutter beside a page could vanish for good once the
+ * gutter shrank (a zoom-in, a narrower pane, a wider page).
+ *
+ * Clamping means such a note can end up overlapping the page's left edge
+ * instead of sitting beside it — deliberately preferred over being invisible,
+ * since from there it can be seen and dragged somewhere better.
+ */
+function reachableX(x: number): number {
+	return Math.max(0, x);
+}
+
 /** `[0,0,0,0]` marks a record whose anchor still needs to be looked up from `quote`. */
 function isUnresolvedAnchor(anchor: PdfRect): boolean {
 	return anchor[0] === 0 && anchor[1] === 0 && anchor[2] === 0 && anchor[3] === 0;
@@ -282,7 +298,7 @@ export class AnnotationLayer {
 				}
 				rails[ann.side].push({ id: ann.id, top: this.anchorTop(rect, ann, box), height: 0, el, zoom: box.zoom });
 			} else if (ann.collapsed) {
-				const left = box.left + (this.freeXPct(rect, ann, box) / 100) * box.width;
+				const left = reachableX(box.left + (this.freeXPct(rect, ann, box) / 100) * box.width);
 				el.style.left = `${left}px`;
 				el.style.top = `${box.top + (this.freeYPct(rect, ann, box) / 100) * box.height}px`;
 				maxRight = Math.max(maxRight, left + DOT_SIZE_PX);
@@ -309,7 +325,29 @@ export class AnnotationLayer {
 		// the notes sitting past the page's right edge, with a margin of blank
 		// space beyond the outermost one — otherwise the rightmost note ends up
 		// flush against (and fighting with) the viewer's own scrollbar.
-		this.layer!.style.width = maxRight > 0 ? `${maxRight + OUTER_MARGIN_PX}px` : "";
+		//
+		// Measured from the DOM, not from the `maxRight` accumulated above: that
+		// running total is what each branch *intended* to place, and a single
+		// branch getting it wrong silently truncates the scrollable area, which
+		// strands every note past the cut-off with no way to scroll to them. A
+		// post-transform getBoundingClientRect cannot disagree with what is on
+		// screen, so the reachable area is defined by the genuinely outermost
+		// note — whichever kind it happens to be — rather than by the rail.
+		const right = Math.max(maxRight, this.measuredRight(built, scroller));
+		this.layer!.style.width = right > 0 ? `${right + OUTER_MARGIN_PX}px` : "";
+	}
+
+	/** Rightmost rendered edge of any placed note, in scroll-container px. */
+	private measuredRight(built: Placed[], scroller: HTMLElement): number {
+		const scrollerRect = scroller.getBoundingClientRect();
+		let right = 0;
+		for (const item of built) {
+			if (!item.el.isConnected) continue;
+			const r = item.el.getBoundingClientRect();
+			if (r.width === 0 && r.height === 0) continue;
+			right = Math.max(right, r.right - scrollerRect.left + scroller.scrollLeft);
+		}
+		return right;
 	}
 
 	/**
@@ -398,7 +436,7 @@ export class AnnotationLayer {
 		box: PageBox,
 		settings: PdfAnnotationSettings
 	): number {
-		const left = box.left + (this.freeXPct(rect, ann, box) / 100) * box.width;
+		const left = reachableX(box.left + (this.freeXPct(rect, ann, box) / 100) * box.width);
 		el.style.left = `${left}px`;
 		el.style.top = `${box.top + (this.freeYPct(rect, ann, box) / 100) * box.height}px`;
 		// freeW/freeH are page-percentages; convert to the note's own unscaled
