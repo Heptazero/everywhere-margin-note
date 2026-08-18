@@ -1,7 +1,7 @@
 import { Menu, type App, type Component } from "obsidian";
 import { resolveCollisions } from "../collision-avoidance";
 import { buildAnnotationBox, type AnnotationBoxHandle } from "./annotation-box";
-import type { PdfAnnotationSettings } from "./annotation-settings";
+import { highlightsBothWays, type PdfAnnotationSettings } from "./annotation-settings";
 import type { PdfAnnotationStore } from "./annotation-store";
 import { DEFAULT_FREE_WIDTH_PCT, type MarginSide, type PdfAnnotation } from "./annotation-types";
 import type { PdfRect } from "./pdf-layer";
@@ -138,11 +138,13 @@ export class AnnotationLayer {
 		if (getComputedStyle(scroller).position === "static") scroller.style.position = "relative";
 
 		this.scroller?.removeEventListener("mousemove", this.onScrollerMove);
+		this.scroller?.removeEventListener("contextmenu", this.onScrollerContextMenu);
 		const layer = scroller.createDiv(LAYER_CLASS);
 		layer.setCssStyles({ position: "absolute", top: "0", left: "0", pointerEvents: "none" });
 		this.layer = layer;
 		this.scroller = scroller;
 		scroller.addEventListener("mousemove", this.onScrollerMove);
+		scroller.addEventListener("contextmenu", this.onScrollerContextMenu);
 		return layer;
 	}
 
@@ -602,7 +604,7 @@ export class AnnotationLayer {
 					icon: "circle",
 					cls: "margin-notes-pdf-swatch",
 					title: "更改颜色",
-					onClick: () => this.pickColor(pdfPath, ann, this.colorOf(ann)),
+					onClick: (ev) => this.pickColor(pdfPath, ann, this.colorOf(ann), { x: ev.clientX, y: ev.clientY }),
 				},
 				{
 					icon: "square",
@@ -641,11 +643,17 @@ export class AnnotationLayer {
 	/** Opens the OS colour picker via a throwaway `<input type=color>` — the same
 	 * mechanism `addColorPicker` uses in the settings tab, just triggered by hand
 	 * since a context menu can't host a native colour swatch itself. */
-	private pickColor(pdfPath: string, ann: PdfAnnotation, defaultColor: string): void {
+	private pickColor(pdfPath: string, ann: PdfAnnotation, defaultColor: string, at?: { x: number; y: number }): void {
 		const input = document.createElement("input");
 		input.type = "color";
 		input.value = ann.color ?? defaultColor;
-		input.style.cssText = "position:fixed;opacity:0;width:0;height:0;pointer-events:none;";
+		// The OS colour panel opens next to the input that triggered it, so the
+		// input has to sit where the click was — left at its default position it
+		// is at the window's corner, and the palette appears there too, miles
+		// from the note being recoloured.
+		const x = at?.x ?? 0;
+		const y = at?.y ?? 0;
+		input.style.cssText = `position:fixed;left:${x}px;top:${y}px;opacity:0;width:1px;height:1px;pointer-events:none;`;
 		document.body.appendChild(input);
 		input.addEventListener("input", () => this.mutate(pdfPath, ann, (a) => (a.color = input.value)));
 		input.addEventListener("change", () => input.remove());
@@ -768,10 +776,7 @@ export class AnnotationLayer {
 			i
 				.setTitle("更改颜色…")
 				.setIcon("palette")
-				.onClick(() => {
-					const defaultColor = ann.pinned ? this.getSettings().railColor : this.getSettings().freeColor;
-					this.pickColor(pdfPath, ann, defaultColor);
-				})
+				.onClick(() => this.pickColor(pdfPath, ann, this.colorOf(ann), at))
 		);
 		if (ann.color) {
 			menu.addItem((i) =>
@@ -808,48 +813,63 @@ export class AnnotationLayer {
 	 * stores page-relative percentages, so it keeps its spot across zoom.
 	 */
 	private attachDrag(handle: AnnotationBoxHandle, pdfPath: string, ann: PdfAnnotation, pageView: PDFPageView): void {
+		// Appended, not prepended: the grip belongs in the corner itself, which is
+		// the last slot in a right-aligned toolbar, not the first.
 		const grip = handle.toolbarEl.createDiv({ cls: "margin-notes-pdf-grip" });
 		grip.setAttribute("aria-label", ann.pinned ? "上下拖动" : "拖动摆放");
-		handle.toolbarEl.prepend(grip);
 
-		grip.addEventListener("pointerdown", (ev) => {
-			ev.preventDefault();
-			ev.stopPropagation();
-			const startX = ev.clientX;
-			const startY = ev.clientY;
-			const startLeft = parseFloat(handle.el.style.left || "0");
-			const startTop = parseFloat(handle.el.style.top || "0");
-			handle.el.addClass("is-dragging");
+		grip.addEventListener("pointerdown", (ev) => this.beginNoteDrag(ev, handle.el, pdfPath, ann, pageView));
+	}
 
-			const onMove = (m: PointerEvent) => {
-				handle.el.style.top = `${startTop + (m.clientY - startY)}px`;
-				if (!ann.pinned) handle.el.style.left = `${startLeft + (m.clientX - startX)}px`;
-			};
-			const onUp = (u: PointerEvent) => {
-				window.removeEventListener("pointermove", onMove);
-				handle.el.removeClass("is-dragging");
-				const dx = u.clientX - startX;
-				const dy = u.clientY - startY;
-				// Measured now, not at build time: a zoom may have happened since.
-				const box = this.currentPageBox(pageView);
-				this.mutate(pdfPath, ann, (a) => {
-					if (a.pinned) {
-						// Stored in PDF points, like everything else here — a raw-px
-						// offset would stay fixed size on screen while the note's own
-						// anchor position (and its neighbours') keeps scaling with
-						// zoom, which is what could reorder/bunch up a rail after
-						// zooming. See anchorTop(). Falls back to raw px only in the
-						// edge case where the page isn't measurable right now.
-						a.offsetY = (a.offsetY ?? 0) + (box ? dy / box.zoom : dy);
-					} else if (box) {
-						a.freeX = ((startLeft + dx - box.left) / box.width) * 100;
-						a.freeY = ((startTop + dy - box.top) / box.height) * 100;
-					}
-				});
-			};
-			window.addEventListener("pointermove", onMove);
-			window.addEventListener("pointerup", onUp, { once: true });
-		});
+	/**
+	 * Moves a note. Shared by the toolbar grip and — since it visibly ties the
+	 * note to its text — the leader line, which can be grabbed anywhere along its
+	 * length to drag the note it belongs to.
+	 */
+	private beginNoteDrag(
+		ev: PointerEvent,
+		el: HTMLElement,
+		pdfPath: string,
+		ann: PdfAnnotation,
+		pageView: PDFPageView
+	): void {
+		ev.preventDefault();
+		ev.stopPropagation();
+		const handle = { el };
+		const startX = ev.clientX;
+		const startY = ev.clientY;
+		const startLeft = parseFloat(handle.el.style.left || "0");
+		const startTop = parseFloat(handle.el.style.top || "0");
+		handle.el.addClass("is-dragging");
+
+		const onMove = (m: PointerEvent) => {
+			handle.el.style.top = `${startTop + (m.clientY - startY)}px`;
+			if (!ann.pinned) handle.el.style.left = `${startLeft + (m.clientX - startX)}px`;
+		};
+		const onUp = (u: PointerEvent) => {
+			window.removeEventListener("pointermove", onMove);
+			handle.el.removeClass("is-dragging");
+			const dx = u.clientX - startX;
+			const dy = u.clientY - startY;
+			// Measured now, not at build time: a zoom may have happened since.
+			const box = this.currentPageBox(pageView);
+			this.mutate(pdfPath, ann, (a) => {
+				if (a.pinned) {
+					// Stored in PDF points, like everything else here — a raw-px
+					// offset would stay fixed size on screen while the note's own
+					// anchor position (and its neighbours') keeps scaling with
+					// zoom, which is what could reorder/bunch up a rail after
+					// zooming. See anchorTop(). Falls back to raw px only in the
+					// edge case where the page isn't measurable right now.
+					a.offsetY = (a.offsetY ?? 0) + (box ? dy / box.zoom : dy);
+				} else if (box) {
+					a.freeX = ((startLeft + dx - box.left) / box.width) * 100;
+					a.freeY = ((startTop + dy - box.top) / box.height) * 100;
+				}
+			});
+		};
+		window.addEventListener("pointermove", onMove);
+		window.addEventListener("pointerup", onUp, { once: true });
 	}
 
 	private currentPageBox(pageView: PDFPageView): PageBox | null {
@@ -1063,6 +1083,29 @@ export class AnnotationLayer {
 	}
 
 	/**
+	 * Right-clicking the highlighted TEXT opens that note's menu — the region on
+	 * the page is the most obvious thing to aim at when you want to change the
+	 * note attached to it, and it is often far easier to hit than a note sitting
+	 * off in a rail. Only swallows the event on an actual hit, so right-clicking
+	 * anywhere else on the PDF still gets Obsidian's own menu.
+	 */
+	private onScrollerContextMenu = (ev: MouseEvent): void => {
+		const pdfPath = this.last?.pdfPath;
+		if (!pdfPath || !this.scroller || this.hitAreas.length === 0) return;
+		if ((ev.target as HTMLElement | null)?.closest(".margin-notes-pdf-note")) return;
+
+		const r = this.scroller.getBoundingClientRect();
+		const x = ev.clientX - r.left + this.scroller.scrollLeft;
+		const y = ev.clientY - r.top + this.scroller.scrollTop;
+		const hit = this.hitAreas.find((h) => x >= h.x0 && x <= h.x1 && y >= h.y0 && y <= h.y1);
+		if (!hit) return;
+
+		ev.preventDefault();
+		ev.stopPropagation();
+		this.openMenu(pdfPath, hit.ann, { x: ev.clientX, y: ev.clientY });
+	};
+
+	/**
 	 * The colour a note and its highlight share. Per-note `color` wins; otherwise
 	 * the rail/free default for its kind — so the band over the text is always
 	 * the same hue as the note it belongs to, which is what makes several
@@ -1132,14 +1175,16 @@ export class AnnotationLayer {
 			const y0 = box.top + ((box.ptY1 - Math.max(rect[1], rect[3])) / box.ptHeight) * box.height;
 			const y1 = box.top + ((box.ptY1 - Math.min(rect[1], rect[3])) / box.ptHeight) * box.height;
 
-			if (mode === "both") this.hitAreas.push({ ann, el, x0, x1, y0, y1 });
+			// Recorded in every mode: reverse hover uses them when the mode wants it,
+			// and right-clicking the region to edit its note works regardless.
+			this.hitAreas.push({ ann, el, x0, x1, y0, y1 });
 
 			if (mode === "always") {
 				const band = layer.createDiv("margin-notes-pdf-anchor-band");
 				band.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
 				band.setCssStyles({ left: `${x0}px`, top: `${y0}px`, width: `${x1 - x0}px`, height: `${y1 - y0}px` });
 			} else if (mode === "line") {
-				this.drawLeader(layer, ann, el, { x0, x1, y0, y1 });
+				this.drawLeader(layer, ann, el, { x0, x1, y0, y1 }, pageView);
 			}
 		}
 	}
@@ -1154,7 +1199,8 @@ export class AnnotationLayer {
 		layer: HTMLElement,
 		ann: PdfAnnotation,
 		el: HTMLElement,
-		a: { x0: number; x1: number; y0: number; y1: number }
+		a: { x0: number; x1: number; y0: number; y1: number },
+		pageView: PDFPageView
 	): void {
 		const noteLeft = parseFloat(el.style.left || "0");
 		const noteWidth = el.getBoundingClientRect().width;
@@ -1183,6 +1229,11 @@ export class AnnotationLayer {
 			transform: `rotate(${Math.atan2(dy, dx)}rad)`,
 			transformOrigin: "0 50%",
 		});
+		line.setAttribute("aria-label", "拖动这条线可以移动批注");
+		const pdfPath = this.last?.pdfPath;
+		if (pdfPath) {
+			line.addEventListener("pointerdown", (ev) => this.beginNoteDrag(ev, el, pdfPath, ann, pageView));
+		}
 	}
 
 	/**
@@ -1195,6 +1246,7 @@ export class AnnotationLayer {
 	 */
 	private onScrollerMove = (ev: MouseEvent): void => {
 		if (this.hitAreas.length === 0 || !this.scroller) return;
+		if (!highlightsBothWays(this.getSettings().highlightMode)) return;
 		// While the pointer is on a note, that note's own mouseenter owns the
 		// highlight. Without this the two fight: the note lights its anchor, then
 		// the very next mousemove finds no anchor under the cursor and clears it.
@@ -1224,6 +1276,7 @@ export class AnnotationLayer {
 		if (this.scroller) {
 			this.applyLeftGutter(this.scroller, 0);
 			this.scroller.removeEventListener("mousemove", this.onScrollerMove);
+			this.scroller.removeEventListener("contextmenu", this.onScrollerContextMenu);
 		}
 		this.hitAreas = [];
 		this.layer?.remove();

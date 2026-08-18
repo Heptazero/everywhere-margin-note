@@ -45,19 +45,25 @@ export interface PdfAnnotationSettings {
 }
 
 /**
- * - `note`   only while the pointer is on the note (the original behaviour)
- * - `both`   also the reverse: pointing at the text lights up its note
- * - `always` every anchor is highlighted all the time
- * - `line`   a thin leader line from each note to its text, no band
+ * What is drawn without any pointer involved. The REVERSE direction (pointing
+ * at the text lights up its note) is not a mode of its own — it is on for
+ * everything except `note`, because a highlight you cannot trace back to its
+ * note is only half a link: seeing a band on the page and having no idea which
+ * note it belongs to is exactly as useless as the note-only direction was.
  */
 export type HighlightMode = "note" | "both" | "always" | "line";
 
 export const HIGHLIGHT_MODE_LABELS: Record<HighlightMode, string> = {
-	note: "只有悬浮批注时高亮原文",
-	both: "双向:悬浮批注或悬浮原文都高亮",
-	always: "一直显示所有高亮",
-	line: "用细线指向原文(不涂色块)",
+	note: "单向 —— 只有悬浮批注时才高亮原文",
+	both: "双向 —— 悬浮批注或悬浮原文,两边互相点亮",
+	line: "箭头 —— 细线一直指向原文,悬浮仍然互相点亮",
+	always: "常亮 —— 所有高亮一直显示,悬浮仍然互相点亮",
 };
+
+/** True for every mode where pointing at the TEXT should light up its note. */
+export function highlightsBothWays(mode: HighlightMode): boolean {
+	return mode !== "note";
+}
 
 export const DEFAULT_PDF_ANNOTATION_SETTINGS: PdfAnnotationSettings = {
 	dataPath: ".margin-notes-hz",

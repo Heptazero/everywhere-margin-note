@@ -168,6 +168,12 @@
 	top: 2px;
 	right: 3px;
 	display: flex;
+	/* The note is overflow:hidden, so a toolbar wider than the note would have
+	   its leftmost icons silently cut off. Wrapping keeps every icon reachable
+	   on a narrow note instead of quietly losing them. */
+	max-width: calc(100% - 6px);
+	flex-wrap: wrap;
+	justify-content: flex-end;
 	gap: 0;
 	opacity: 0;
 	transition: opacity 0.1s;
@@ -352,12 +358,17 @@
    note/list-row, removed explicitly on mouseleave — NOT the flash's timed
    fade-out, which would make a highlight vanish mid-hover on anything longer
    than 1.6s. */
+/* The permanent band ("常亮") and the hover band are the SAME thing shown for
+   different reasons, so they share one definition — they used to be two rules
+   that had drifted apart in both colour and opacity, which is exactly the kind
+   of divergence a second declaration invites. */
+.margin-notes-pdf-anchor-band,
 .margin-notes-pdf-anchor-hover {
 	position: absolute;
 	pointer-events: none;
 	border-radius: 2px;
-	background: var(--interactive-accent);
-	opacity: 0.32;
+	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
+	opacity: var(--margin-notes-pdf-highlight-opacity, 0.3);
 }
 
 /* ---- Annotation list panel ---- */
@@ -524,14 +535,6 @@
    itself, and it sits UNDER the notes so a note dragged over the page stays
    readable. Colour comes from the note it belongs to (annotation-layer.ts's
    colorOf), so several highlights on one page stay tellable apart. */
-.margin-notes-pdf-anchor-band {
-	position: absolute;
-	pointer-events: none;
-	border-radius: 2px;
-	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
-	opacity: var(--margin-notes-pdf-highlight-opacity, 0.3);
-}
-
 /* `line`: a hairline leader from the note to its text, rotated into place by
    annotation-layer.ts. Height is 1px and never scales — a leader is an
    annotation ON the view, not part of the page, and a hairline reads correctly
@@ -539,9 +542,24 @@
 .margin-notes-pdf-leader {
 	position: absolute;
 	height: 1px;
-	pointer-events: none;
 	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
 	opacity: var(--margin-notes-pdf-highlight-opacity, 0.3);
+	/* Grabbable: press and drag the line to move the note it belongs to. */
+	pointer-events: auto;
+	cursor: grab;
+}
+.margin-notes-pdf-leader:hover {
+	opacity: 1;
+}
+.margin-notes-pdf-leader.is-dragging {
+	cursor: grabbing;
+	opacity: 1;
+}
+/* A 1px line is far too thin to hit reliably, so widen only the hit area. */
+.margin-notes-pdf-leader::before {
+	content: "";
+	position: absolute;
+	inset: -5px 0;
 }
 
 /* `both`: the note lit up because the pointer is over its TEXT (the reverse of
@@ -558,8 +576,3 @@
 	fill: currentColor;
 }
 
-/* The hover band uses the note's colour too, and the configured opacity. */
-.margin-notes-pdf-anchor-hover {
-	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
-	opacity: var(--margin-notes-pdf-highlight-opacity, 0.3);
-}
