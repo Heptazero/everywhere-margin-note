@@ -58,6 +58,8 @@ export class PdfAnnotationsController {
 
 	private rectSelect: RectSelectController = { armed: false };
 	private pendingPlacement: NewNoteForm | null = null;
+	/** Set while waiting for the user to point at a new highlight for an existing note. */
+	private pendingReanchor: { pdfPath: string; id: string } | null = null;
 	private states = new WeakMap<FileView, ViewState>();
 	private tracked = new WeakSet<FileView>();
 	/**
@@ -167,6 +169,40 @@ export class PdfAnnotationsController {
 		this.pendingPlacement = form;
 		this.rectSelect.armed = true;
 		new Notice("在 PDF 上拖一个框,标出这条批注指的位置");
+	}
+
+	/**
+	 * Re-points an existing note's highlight, by the same two routes as creating
+	 * one: an active text selection wins if there is one, otherwise a one-shot
+	 * box drag is armed. Needed because a highlight can end up wrong without the
+	 * user having done anything — a quote that never matched the page's text
+	 * layer, or one written against the other language of a translation pair —
+	 * and until now there was no way to correct it from the UI at all.
+	 *
+	 * Also clears `quote`: once a human has pointed at the real region, that rect
+	 * is the truth, and leaving a stale quote behind would let a later
+	 * re-resolution silently overwrite the correction.
+	 */
+	reanchor(pdfPath: string, ann: PdfAnnotation): void {
+		const sel = anchorFromActiveSelection();
+		if (sel) {
+			this.applyReanchor(pdfPath, ann.id, sel.pageNumber, sel.rect);
+			return;
+		}
+		this.pendingReanchor = { pdfPath, id: ann.id };
+		this.rectSelect.armed = true;
+		new Notice("在 PDF 上选中文字或拖一个框,重新指定这条批注指向的位置");
+	}
+
+	private applyReanchor(pdfPath: string, id: string, pageNumber: number, rect: PdfRect): void {
+		const ann = this.store.forFile(pdfPath).find((a) => a.id === id);
+		if (!ann) return;
+		ann.page = pageNumber;
+		ann.anchor = rect;
+		ann.quote = undefined;
+		ann.updatedAt = Date.now();
+		this.store.upsert(pdfPath, ann);
+		new Notice("已更新这条批注的高亮位置");
 	}
 
 	/**
@@ -518,7 +554,8 @@ export class PdfAnnotationsController {
 			component,
 			this.store,
 			() => this.settings,
-			(patch) => this.patchSettings(patch)
+			(patch) => this.patchSettings(patch),
+			(pdfPath, ann) => this.reanchor(pdfPath, ann)
 		);
 
 		// Obsidian reuses the same FileView (and pdf.js viewer) when the user opens a
@@ -549,6 +586,12 @@ export class PdfAnnotationsController {
 			if (!trackedPageDivs.has(pageView.div)) {
 				trackedPageDivs.add(pageView.div);
 				const detach = attachRectSelectListener(pageView, this.rectSelect, (rect) => {
+					const redo = this.pendingReanchor;
+					this.pendingReanchor = null;
+					if (redo) {
+						this.applyReanchor(redo.pdfPath, redo.id, pageNumber, rect);
+						return;
+					}
 					const pending = this.pendingPlacement;
 					this.pendingPlacement = null;
 					const p = currentPath();

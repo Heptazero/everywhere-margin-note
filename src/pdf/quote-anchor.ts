@@ -15,11 +15,25 @@ import { computeSelectionRects, getTextLayerInfo, type Selection } from "./selec
 /** Below this, a match is too likely to be coincidental to trust. */
 const MIN_QUOTE_LEN = 4;
 
-function normalizeForSearch(s: string): string {
-	return s.toLowerCase().replace(/\s+/g, " ").trim();
+/**
+ * Matching key: lowercased with ALL whitespace removed.
+ *
+ * Removing whitespace entirely (rather than collapsing it to single spaces) is
+ * what makes this work for Chinese. pdf.js splits a line into many text-layer
+ * spans, and this used to join them with a space — correct for English, where
+ * spans break at word boundaries and the space belongs there, but corrupting
+ * for CJK, which has no inter-word spaces: a quote like
+ * `皮层和海马回路中的神经群体活动` could never match a flattened
+ * `皮层和海马回路中的 神经群体活动` and every Chinese annotation silently
+ * failed to anchor. Since the same transform is applied to both sides, dropping
+ * whitespace is harmless for English too ("the quick" and "thequick" both
+ * squash to the same key), which is why this is one code path and not two.
+ */
+function squash(s: string): string {
+	return s.toLowerCase().replace(/\s+/g, "");
 }
 
-/** Finds which text-div index a position in the flattened string falls in. */
+/** Finds which text-div index a position in the concatenated string falls in. */
 function divIndexAt(divStart: number[], flatIndex: number): number {
 	let lo = 0;
 	let hi = divStart.length - 1;
@@ -40,37 +54,53 @@ function divIndexAt(divStart: number[], flatIndex: number): number {
  * Searches `pageView`'s rendered text layer for `quote` and returns its
  * bounding PdfRect, or null if the text layer isn't ready or nothing matches.
  *
- * The search is case-insensitive with whitespace collapsed on both sides —
- * pdf.js text-layer spans essentially never contain internal multi-space runs,
- * so this rarely shifts offsets enough to matter; when it does, the match
- * still lands within a line or two of the right spot, which the caller's
- * fallback-on-failure path treats as an acceptable degrade, not a bug to chase.
+ * Works in two coordinate spaces: `raw` is the plain concatenation of the text
+ * divs (so an index into it maps straight back to a div + offset, which is what
+ * `computeSelectionRects` needs), and the squashed key is what the search runs
+ * on. `keep` maps squashed positions back to raw ones.
  */
 export function resolveQuoteAnchor(pageView: PDFPageView, quote: string): PdfRect | null {
-	const target = normalizeForSearch(quote);
+	const target = squash(quote);
 	if (target.length < MIN_QUOTE_LEN) return null;
 
 	const info = getTextLayerInfo(pageView);
 	if (!info) return null;
 
-	let flat = "";
+	// Concatenated with NO separator — any separator would itself have to be
+	// squashed away, and omitting it keeps raw indices exactly aligned with the
+	// divs' own character offsets.
+	let raw = "";
 	const divStart: number[] = [];
-	info.textDivs.forEach((div, i) => {
-		divStart.push(flat.length);
-		flat += div.textContent ?? "";
-		if (i < info.textDivs.length - 1) flat += " ";
-	});
+	for (const div of info.textDivs) {
+		divStart.push(raw.length);
+		raw += div.textContent ?? "";
+	}
 	if (divStart.length === 0) return null;
 
-	const idx = normalizeForSearch(flat).indexOf(target);
-	if (idx < 0) return null;
+	let squashed = "";
+	const keep: number[] = [];
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i];
+		if (/\s/.test(ch)) continue;
+		squashed += ch.toLowerCase();
+		keep.push(i);
+	}
 
-	const startDiv = divIndexAt(divStart, idx);
-	const endDiv = divIndexAt(divStart, idx + target.length);
-	const startOffset = Math.max(0, idx - divStart[startDiv]);
-	const endOffset = Math.max(0, idx + target.length - divStart[endDiv]);
+	const hit = squashed.indexOf(target);
+	if (hit < 0) return null;
 
-	const selection: Selection = [startDiv, startOffset, endDiv, endOffset];
+	const rawStart = keep[hit];
+	const rawEnd = keep[hit + target.length - 1] + 1;
+
+	const startDiv = divIndexAt(divStart, rawStart);
+	const endDiv = divIndexAt(divStart, rawEnd - 1);
+	const selection: Selection = [
+		startDiv,
+		rawStart - divStart[startDiv],
+		endDiv,
+		rawEnd - divStart[endDiv],
+	];
+
 	const lines = computeSelectionRects(pageView, selection);
 	return unionRect(lines.map((l) => l.rect));
 }

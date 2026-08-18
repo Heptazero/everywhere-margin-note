@@ -133,6 +133,11 @@ export class AnnotationListView extends ItemView {
 					onClick: () => void this.controller.revealAnnotation(pdfPath, ann),
 				},
 				{
+					icon: "highlighter",
+					title: "重新指定高亮位置(先在 PDF 上选中文字,或点这里再拖框)",
+					onClick: () => this.controller.reanchor(pdfPath, ann),
+				},
+				{
 					icon: "x",
 					title: "删除批注",
 					cls: "margin-notes-pdf-del",

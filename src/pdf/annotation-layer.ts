@@ -99,7 +99,10 @@ export class AnnotationLayer {
 		private component: Component,
 		private store: PdfAnnotationStore,
 		private getSettings: () => PdfAnnotationSettings,
-		private saveSettings: (patch: Partial<PdfAnnotationSettings>) => void
+		private saveSettings: (patch: Partial<PdfAnnotationSettings>) => void,
+		/** Hands "re-pick this note's highlight" back to the controller, which owns
+		 * the selection/box-drag machinery. */
+		private requestReanchor: (pdfPath: string, ann: PdfAnnotation) => void
 	) {}
 
 	private ensureLayer(anyPageDiv: HTMLElement): HTMLDivElement {
@@ -578,6 +581,13 @@ export class AnnotationLayer {
 					.onClick(() => this.mutate(pdfPath, ann, (a) => (a.side = a.side === "right" ? "left" : "right")))
 			);
 		}
+		menu.addSeparator();
+		menu.addItem((i) =>
+			i
+				.setTitle("重新指定高亮位置(选中文字或拖框)")
+				.setIcon("highlighter")
+				.onClick(() => this.requestReanchor(pdfPath, ann))
+		);
 		menu.addSeparator();
 		menu.addItem((i) =>
 			i
