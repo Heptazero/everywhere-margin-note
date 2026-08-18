@@ -61,6 +61,14 @@ export interface PdfAnnotation {
 	 * nudge now scales with the note's own anchor instead of staying frozen.
 	 */
 	offsetY?: number;
+	/**
+	 * Where along the highlighted region the leader line attaches, as fractions
+	 * of the anchor box (0–1 on each axis). Draggable, but only ever WITHIN the
+	 * region — the arrow says "this note is about this text", so its end has to
+	 * stay on that text; letting it wander would make it point at something the
+	 * note is not attached to. Unset = the middle of the edge facing the note.
+	 */
+	leaderAt?: { x: number; y: number };
 	/** Per-note font multiplier over the global size. */
 	fontScale?: number;
 	/** Per-note colour override; unset = follow the pinned/free default. */
@@ -101,6 +109,7 @@ export function normalizeAnnotation(raw: LegacyAnnotation): PdfAnnotation {
 		fontScale: raw.fontScale,
 		color: raw.color,
 		quote: raw.quote,
+		leaderAt: raw.leaderAt,
 		style: raw.style,
 		text: raw.text ?? "",
 		createdAt: raw.createdAt ?? Date.now(),

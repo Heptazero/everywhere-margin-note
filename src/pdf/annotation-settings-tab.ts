@@ -2,6 +2,7 @@ import { App, PluginSettingTab, Setting, type Plugin } from "obsidian";
 import {
 	DEFAULT_PDF_ANNOTATION_SETTINGS,
 	HIGHLIGHT_MODE_LABELS,
+	parsePalette,
 	type HighlightMode,
 	type PdfAnnotationSettings,
 } from "./annotation-settings";
@@ -178,6 +179,36 @@ export class PdfAnnotationSettingTab extends PluginSettingTab {
 						commit();
 					})
 			);
+
+		new Setting(containerEl)
+			.setName("可选颜色")
+			.setDesc(
+				"给单条批注改颜色时可选的预设色,用空格或逗号分隔的 #RRGGBB。" +
+					"改颜色走的是这组预设,不再弹系统取色盘(那个面板总是跑到窗口角落)。"
+			)
+			.addTextArea((t) => {
+				t.inputEl.rows = 2;
+				t.inputEl.style.width = "100%";
+				t.setValue(settings.palette.join(" ")).onChange((v) => {
+					const parsed = parsePalette(v);
+					// Ignore an unparseable/empty entry rather than saving a palette
+					// with nothing in it — that would leave the picker with no colours
+					// and no way back except editing the JSON.
+					if (parsed.length === 0) return;
+					settings.palette = parsed;
+					commit();
+					renderPreview();
+				});
+			});
+
+		const preview = containerEl.createDiv({ cls: "margin-notes-pdf-palette-preview" });
+		const renderPreview = () => {
+			preview.empty();
+			for (const c of settings.palette) {
+				preview.createDiv({ cls: "margin-notes-pdf-swatch-dot" }).style.background = c;
+			}
+		};
+		renderPreview();
 
 		new Setting(containerEl).setName("轨道批注颜色").addColorPicker((c) =>
 			c.setValue(settings.railColor).onChange((v) => {

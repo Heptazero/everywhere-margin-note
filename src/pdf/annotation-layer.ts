@@ -1,7 +1,8 @@
 import { Menu, Notice, type App, type Component } from "obsidian";
 import { resolveCollisions } from "../collision-avoidance";
 import { buildAnnotationBox, type AnnotationBoxHandle } from "./annotation-box";
-import { highlightsBothWays, type PdfAnnotationSettings } from "./annotation-settings";
+import { darken, highlightsBothWays, type PdfAnnotationSettings } from "./annotation-settings";
+import { openSwatchPicker } from "./swatch-picker";
 import type { PdfAnnotationStore } from "./annotation-store";
 import { DEFAULT_FREE_WIDTH_PCT, type MarginSide, type PdfAnnotation } from "./annotation-types";
 import type { PdfRect } from "./pdf-layer";
@@ -48,8 +49,8 @@ const MIN_RAIL_WIDTH_PT = 50;
 const MIN_FREE_WIDTH_PT = 40;
 const MIN_HEIGHT_PX = 20;
 const REBUILD_DEBOUNCE_MS = 60;
-/** How far the arrow's end has to be pulled before it is worth explaining that
- * dragging is not how a highlight gets moved. Below this it reads as a slip. */
+/** How far OUTSIDE the highlight the pointer has to stray before it is worth
+ * explaining that the arrow cannot leave it. Below this it reads as a slip. */
 const REANCHOR_HINT_PX = 24;
 
 /** Page geometry in scroll-container coordinates, plus the pt→px zoom factor. */
@@ -630,7 +631,7 @@ export class AnnotationLayer {
 					icon: "circle",
 					cls: "margin-notes-pdf-swatch",
 					title: "更改颜色",
-					onClick: (ev) => this.pickColor(pdfPath, ann, this.colorOf(ann), { x: ev.clientX, y: ev.clientY }),
+					onClick: (ev) => this.pickColor(pdfPath, ann, { x: ev.clientX, y: ev.clientY }),
 				},
 				{
 					icon: "square",
@@ -649,14 +650,23 @@ export class AnnotationLayer {
 		handle.el.dataset.mode = ann.pinned ? "rail" : "free";
 		handle.el.dataset.side = ann.side;
 		handle.el.dataset.style = ann.style ?? "boxed";
+		const color = this.colorOf(ann);
 		if (ann.color) handle.el.style.setProperty("--margin-notes-pdf-note-color", ann.color);
-		handle.el
-			.querySelector<HTMLElement>(".margin-notes-pdf-swatch")
-			?.style.setProperty("color", this.colorOf(ann));
+		handle.el.style.setProperty("--margin-notes-pdf-note-color-deep", darken(color));
+		handle.el.querySelector<HTMLElement>(".margin-notes-pdf-swatch")?.style.setProperty("color", color);
 
 		handle.el.addEventListener("contextmenu", (e) => this.showMenu(e, pdfPath, ann));
-		handle.el.addEventListener("mouseenter", () => this.beginHoverHighlight(pageView, ann));
-		handle.el.addEventListener("mouseleave", () => this.endHoverHighlight());
+		// The same `is-linked` state as hovering the TEXT applies, so the two
+		// directions of the same relationship look identical rather than one
+		// getting an outline and the other only an opacity bump.
+		handle.el.addEventListener("mouseenter", () => {
+			handle.el.addClass("is-linked");
+			this.beginHoverHighlight(pageView, ann);
+		});
+		handle.el.addEventListener("mouseleave", () => {
+			handle.el.removeClass("is-linked");
+			this.endHoverHighlight();
+		});
 		this.attachDrag(handle, pdfPath, ann, pageView);
 		this.attachResize(handle, pdfPath, ann, pageView);
 		return handle;
@@ -666,27 +676,14 @@ export class AnnotationLayer {
 		this.mutate(pdfPath, ann, (a) => (a.fontScale = Math.max(0.3, Math.min(4, (a.fontScale ?? 1) + delta))));
 	}
 
-	/** Opens the OS colour picker via a throwaway `<input type=color>` — the same
-	 * mechanism `addColorPicker` uses in the settings tab, just triggered by hand
-	 * since a context menu can't host a native colour swatch itself. */
-	private pickColor(pdfPath: string, ann: PdfAnnotation, defaultColor: string, at?: { x: number; y: number }): void {
-		const input = document.createElement("input");
-		input.type = "color";
-		input.value = ann.color ?? defaultColor;
-		// The OS colour panel opens next to the input that triggered it, so the
-		// input has to sit where the click was — left at its default position it
-		// is at the window's corner, and the palette appears there too, miles
-		// from the note being recoloured.
-		const x = at?.x ?? 0;
-		const y = at?.y ?? 0;
-		input.style.cssText = `position:fixed;left:${x}px;top:${y}px;opacity:0;width:1px;height:1px;pointer-events:none;`;
-		document.body.appendChild(input);
-		input.addEventListener("input", () => this.mutate(pdfPath, ann, (a) => (a.color = input.value)));
-		input.addEventListener("change", () => input.remove());
-		// Some Electron builds never fire `change` if the picker is dismissed
-		// without a click-away; don't leak the node either way.
-		window.setTimeout(() => input.remove(), 30_000);
-		input.click();
+	/** Preset swatches rather than the OS colour panel — see swatch-picker.ts. */
+	private pickColor(pdfPath: string, ann: PdfAnnotation, at: { x: number; y: number }): void {
+		openSwatchPicker({
+			at,
+			colors: this.getSettings().palette,
+			current: ann.color,
+			onPick: (color) => this.mutate(pdfPath, ann, (a) => (a.color = color)),
+		});
 	}
 
 	/**
@@ -802,7 +799,7 @@ export class AnnotationLayer {
 			i
 				.setTitle("更改颜色…")
 				.setIcon("palette")
-				.onClick(() => this.pickColor(pdfPath, ann, this.colorOf(ann), at))
+				.onClick(() => this.pickColor(pdfPath, ann, at))
 		);
 		if (ann.color) {
 			menu.addItem((i) =>
@@ -1247,7 +1244,7 @@ export class AnnotationLayer {
 		const line = layer.createDiv("margin-notes-pdf-leader");
 		const knob = layer.createDiv("margin-notes-pdf-leader-knob");
 		for (const n of [line, knob]) n.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
-		knob.setAttribute("aria-label", "这一端指向原文;高亮范围要改请用菜单里的「重新指定高亮位置」");
+		knob.setAttribute("aria-label", "拖动可以改变箭头落在高亮范围内的哪个位置");
 
 		const parts: LeaderParts = { line, knob, noteEl: el, pageView, ann, a: { ...a } };
 		this.leaders.set(ann.id, parts);
@@ -1270,10 +1267,13 @@ export class AnnotationLayer {
 
 		const noteCentre = noteLeft + noteRect.width / 2;
 		const textCentre = (a.x0 + a.x1) / 2;
-		const sx = noteCentre > textCentre ? noteLeft : noteLeft + noteRect.width;
+		const facingRight = noteCentre > textCentre;
+		const sx = facingRight ? noteLeft : noteLeft + noteRect.width;
 		const sy = noteTop + noteRect.height / 2;
-		const tx = noteCentre > textCentre ? a.x1 : a.x0;
-		const ty = (a.y0 + a.y1) / 2;
+		// Default attachment: the middle of the region's edge nearest the note.
+		const f = p.ann.leaderAt ?? { x: facingRight ? 1 : 0, y: 0.5 };
+		const tx = a.x0 + f.x * (a.x1 - a.x0);
+		const ty = a.y0 + f.y * (a.y1 - a.y0);
 
 		const dx = tx - sx;
 		const dy = ty - sy;
@@ -1295,43 +1295,52 @@ export class AnnotationLayer {
 	}
 
 	/**
-	 * The arrow's text end can be pulled, but pulling it does NOT move the
-	 * highlight: on release the leader springs back to the anchor.
+	 * Moves where the arrow attaches, CLAMPED to the highlighted region.
 	 *
-	 * A highlight records where something actually IS in the document. Letting a
-	 * stray drag silently redefine that loses the real location with no warning
-	 * and no way to tell it happened — and this knob sits right on the page, easy
-	 * to catch by accident. So the drag is a rubber band: it shows the connection
-	 * while held, then returns. Pulled well clear of the anchor it also says how
-	 * to change the highlight for real, since that is plainly what was intended.
-	 *
-	 * Re-anchoring stays an explicit act: select the text (or drag a box) and use
-	 * 「重新指定高亮位置」.
+	 * Two different things could have been meant by dragging this end, and only
+	 * one of them is safe. Moving the attachment point is presentational — the
+	 * arrow leaves from a tidier spot — and costs nothing if done by accident.
+	 * Moving the REGION would redefine where the note says its subject is, which
+	 * is content, and a stray drag must never silently rewrite that. So the point
+	 * slides freely inside the region and stops at its edge; pulling well past
+	 * the edge says how to actually change the region.
 	 */
 	private beginAnchorDrag(ev: PointerEvent, p: LeaderParts): void {
 		ev.preventDefault();
 		ev.stopPropagation();
+		const pdfPath = this.last?.pdfPath;
+		if (!pdfPath || !this.scroller) return;
 
-		const startX = ev.clientX;
-		const startY = ev.clientY;
-		const home = { ...p.a };
+		const scroller = this.scroller;
+		const a = p.a;
+		const w = a.x1 - a.x0;
+		const h = a.y1 - a.y0;
+		let escaped = 0;
 		p.knob.addClass("is-dragging");
 
+		const fractionAt = (m: MouseEvent) => {
+			const r = scroller.getBoundingClientRect();
+			const x = m.clientX - r.left + scroller.scrollLeft;
+			const y = m.clientY - r.top + scroller.scrollTop;
+			// How far outside the region the pointer went, for the hint below.
+			escaped = Math.max(escaped, a.x0 - x, x - a.x1, a.y0 - y, y - a.y1);
+			return {
+				x: w > 0 ? Math.max(0, Math.min(1, (x - a.x0) / w)) : 0,
+				y: h > 0 ? Math.max(0, Math.min(1, (y - a.y0) / h)) : 0.5,
+			};
+		};
+
 		const onMove = (m: PointerEvent) => {
-			const dx = m.clientX - startX;
-			const dy = m.clientY - startY;
-			p.a = { x0: home.x0 + dx, x1: home.x1 + dx, y0: home.y0 + dy, y1: home.y1 + dy };
+			p.ann.leaderAt = fractionAt(m);
 			this.positionLeader(p);
 		};
 		const onUp = (u: PointerEvent) => {
 			window.removeEventListener("pointermove", onMove);
 			p.knob.removeClass("is-dragging");
-			const dragged = Math.hypot(u.clientX - startX, u.clientY - startY);
-			// Snap back — the anchor is never written by this gesture.
-			p.a = home;
-			this.positionLeader(p);
-			if (dragged >= REANCHOR_HINT_PX) {
-				new Notice("高亮位置不会被拖动改变。要改的话:选中新的文字,再用批注菜单里的「重新指定高亮位置」");
+			const at = fractionAt(u);
+			this.mutate(pdfPath, p.ann, (ann) => (ann.leaderAt = at));
+			if (escaped >= REANCHOR_HINT_PX) {
+				new Notice("箭头只能落在高亮范围内。要改高亮范围:选中新的文字,再用批注菜单里的「重新指定高亮位置」");
 			}
 		};
 		window.addEventListener("pointermove", onMove);

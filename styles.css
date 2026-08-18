@@ -579,12 +579,16 @@
 	opacity: calc(var(--margin-notes-pdf-highlight-opacity, 0.3) * 1.6);
 }
 
-/* `both`: the note lit up because the pointer is over its TEXT (the reverse of
-   the usual direction), so it needs to be visible without being hovered. */
+/* The lit-up state, applied identically whether the pointer is on the note or on
+   its text — one relationship, one appearance. The outline is a DARKER shade of
+   the note's own colour (annotation-settings.ts's darken(), pushed in as
+   --margin-notes-pdf-note-color-deep), not the theme accent: an accent-coloured
+   ring looks the same on every note and so says nothing about which one lit up,
+   and it reads as "selected by the app" rather than as this note's identity. */
 .margin-notes-pdf-note.is-linked {
 	opacity: 1;
 	z-index: 2;
-	box-shadow: 0 0 0 2px var(--margin-notes-pdf-note-color, var(--interactive-accent));
+	box-shadow: 0 0 0 2px var(--margin-notes-pdf-note-color-deep, var(--margin-notes-pdf-note-color, var(--interactive-accent)));
 }
 
 /* The toolbar's colour button shows the note's actual colour rather than the
@@ -593,3 +597,51 @@
 	fill: currentColor;
 }
 
+
+/* ---- Preset colour swatches (swatch-picker.ts) ---- */
+
+.margin-notes-pdf-swatches {
+	position: fixed;
+	z-index: var(--layer-menu);
+	display: grid;
+	grid-template-columns: repeat(4, auto);
+	gap: 6px;
+	padding: 8px;
+	border-radius: 6px;
+	background: var(--background-secondary);
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.margin-notes-pdf-swatch-dot {
+	width: 20px;
+	height: 20px;
+	border-radius: 50%;
+	cursor: pointer;
+	box-shadow: 0 0 0 1px var(--background-modifier-border);
+}
+.margin-notes-pdf-swatch-dot:hover {
+	transform: scale(1.15);
+}
+.margin-notes-pdf-swatch-dot.is-current {
+	box-shadow: 0 0 0 2px var(--text-normal);
+}
+/* Spans the grid so it reads as an action, not a ninth colour. */
+.margin-notes-pdf-swatch-reset {
+	grid-column: 1 / -1;
+	padding: 3px 4px;
+	text-align: center;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.margin-notes-pdf-swatch-reset:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.margin-notes-pdf-palette-preview {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin: -6px 0 18px;
+}

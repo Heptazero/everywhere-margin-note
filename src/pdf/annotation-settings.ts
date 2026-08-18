@@ -42,6 +42,15 @@ export interface PdfAnnotationSettings {
 	highlightMode: HighlightMode;
 	/** 0-100, applied to the highlight band only (notes have their own `opacity`). */
 	highlightOpacity: number;
+	/**
+	 * Preset colours offered when recolouring a note. Replaces the OS colour
+	 * panel: that panel opens next to the invisible input that triggered it,
+	 * which never reliably lands near the note, and picking a free-form colour
+	 * every time produces a set of highlights that don't read as a system. A
+	 * short fixed palette is faster to use and keeps a document's annotations
+	 * visually coherent.
+	 */
+	palette: string[];
 }
 
 /**
@@ -60,6 +69,30 @@ export const HIGHLIGHT_MODE_LABELS: Record<HighlightMode, string> = {
 	always: "常亮 —— 所有高亮一直显示,悬浮仍然互相点亮",
 };
 
+/**
+ * A darker shade of `hex`, used for the emphasis outline on a highlighted note.
+ * Derived from the note's OWN colour rather than the theme accent, so the
+ * outline says which note lit up instead of looking identical for all of them.
+ * Computed here rather than with CSS `color-mix` so it does not depend on the
+ * renderer's colour-function support.
+ */
+export function darken(hex: string, amount = 0.4): string {
+	const m = /^#?([\da-f]{6})$/i.exec(hex.trim());
+	if (!m) return hex;
+	const n = parseInt(m[1], 16);
+	const f = Math.max(0, Math.min(1, 1 - amount));
+	const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => Math.round(c * f));
+	return `#${ch.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Accepts "#abc123, #def456" or whitespace/newline separated; drops junk. */
+export function parsePalette(raw: string): string[] {
+	return raw
+		.split(/[\s,]+/)
+		.map((t) => t.trim())
+		.filter((t) => /^#[\da-f]{6}$/i.test(t));
+}
+
 /** True for every mode where pointing at the TEXT should light up its note. */
 export function highlightsBothWays(mode: HighlightMode): boolean {
 	return mode !== "note";
@@ -77,6 +110,7 @@ export const DEFAULT_PDF_ANNOTATION_SETTINGS: PdfAnnotationSettings = {
 	fontSize: 12,
 	highlightMode: "note",
 	highlightOpacity: 30,
+	palette: ["#eed37c", "#7d94ca", "#8fbf8f", "#d98f8f", "#b998d4", "#7fbfc4", "#c9a37a", "#9aa0a6"],
 };
 
 interface StoredShape {
@@ -110,6 +144,8 @@ export async function loadPdfAnnotationSettings(plugin: { loadData(): Promise<un
 		railColor: raw.railColor ?? raw.marginColor ?? DEFAULT_PDF_ANNOTATION_SETTINGS.railColor,
 		freeColor: raw.freeColor ?? raw.floatingColor ?? DEFAULT_PDF_ANNOTATION_SETTINGS.freeColor,
 		opacity: raw.opacity ?? raw.marginOpacity ?? DEFAULT_PDF_ANNOTATION_SETTINGS.opacity,
+		// An empty palette would leave the picker with nothing to offer.
+		palette: raw.palette && raw.palette.length > 0 ? raw.palette : DEFAULT_PDF_ANNOTATION_SETTINGS.palette,
 	};
 }
 
