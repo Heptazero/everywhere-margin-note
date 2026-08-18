@@ -1,9 +1,20 @@
 import { debounce, normalizePath, type App, type Plugin } from "obsidian";
 import { normalizeAnnotation, type PdfAnnotation } from "./annotation-types";
+import type { PdfFingerprint } from "./counterpart";
 
 interface FileShape {
-	version: 2;
+	version: 3;
+	/**
+	 * Annotations, keyed by GROUP rather than by path — a paper and its
+	 * layout-preserving translation resolve to the same key, so annotating
+	 * either side is literally the same data rather than two copies kept in
+	 * sync. See `pairs`.
+	 */
 	pdfAnnotations: Record<string, PdfAnnotation[]>;
+	/** member path → group key (the source-language side of the pair). */
+	pairs: Record<string, string>;
+	/** Cached per-file geometry/script, gathered from viewers as files are opened. */
+	fingerprints: Record<string, PdfFingerprint>;
 }
 
 const FILE_NAME = "annotations.json";
@@ -30,6 +41,8 @@ export type StoreListener = () => void;
  */
 export class PdfAnnotationStore {
 	private data: Record<string, PdfAnnotation[]> = {};
+	private pairs: Record<string, string> = {};
+	private fingerprints: Record<string, PdfFingerprint> = {};
 	private path = "";
 	private listeners = new Set<StoreListener>();
 	private save = debounce(() => void this.flush(), 500, true);
@@ -52,11 +65,14 @@ export class PdfAnnotationStore {
 		for (const l of this.listeners) l();
 	}
 
-	private adopt(raw: Record<string, unknown[]>): void {
+	private adopt(parsed: Partial<FileShape>): void {
 		this.data = {};
-		for (const [key, list] of Object.entries(raw ?? {})) {
-			this.data[key] = (list ?? []).map((a) => normalizeAnnotation(a as never));
+		for (const [key, list] of Object.entries(parsed?.pdfAnnotations ?? {})) {
+			this.data[key] = ((list ?? []) as unknown[]).map((a) => normalizeAnnotation(a as never));
 		}
+		// Absent in v1/v2 files — an unpaired library is just an empty map.
+		this.pairs = parsed?.pairs ?? {};
+		this.fingerprints = parsed?.fingerprints ?? {};
 	}
 
 	/** Loads from `configuredPath`, migrating anything left at older locations. */
@@ -73,7 +89,7 @@ export class PdfAnnotationStore {
 				// save — refuse to load rather than starting from an empty object.
 				throw new Error(`margin-notes-hz: 批注文件解析失败,请检查 ${this.path}`);
 			}
-			this.adopt((parsed?.pdfAnnotations ?? {}) as Record<string, unknown[]>);
+			this.adopt(parsed);
 			return;
 		}
 
@@ -83,7 +99,7 @@ export class PdfAnnotationStore {
 		if (legacyFile !== this.path && (await adapter.exists(legacyFile))) {
 			try {
 				const parsed = JSON.parse(await adapter.read(legacyFile)) as Partial<FileShape>;
-				this.adopt((parsed?.pdfAnnotations ?? {}) as Record<string, unknown[]>);
+				this.adopt(parsed);
 				await this.flush();
 				return;
 			} catch {
@@ -93,10 +109,10 @@ export class PdfAnnotationStore {
 
 		const legacy = (await this.plugin.loadData()) as { pdfAnnotations?: Record<string, unknown[]> } | null;
 		if (legacy?.pdfAnnotations && Object.keys(legacy.pdfAnnotations).length > 0) {
-			this.adopt(legacy.pdfAnnotations);
+			this.adopt(legacy as Partial<FileShape>);
 			await this.flush();
 		} else {
-			this.data = {};
+			this.adopt({});
 		}
 	}
 
@@ -116,12 +132,77 @@ export class PdfAnnotationStore {
 		const adapter = this.app.vault.adapter;
 		const dir = this.path.includes("/") ? this.path.slice(0, this.path.lastIndexOf("/")) : "";
 		if (dir && !(await adapter.exists(dir))) await adapter.mkdir(dir);
-		const payload: FileShape = { version: 2, pdfAnnotations: this.data };
+		const payload: FileShape = {
+			version: 3,
+			pdfAnnotations: this.data,
+			pairs: this.pairs,
+			fingerprints: this.fingerprints,
+		};
 		await adapter.write(this.path, JSON.stringify(payload, null, 2));
 	}
 
+	/** Resolves a path to the bucket it shares with its counterpart, if paired. */
 	private key(pdfPath: string): string {
-		return normalizePath(pdfPath);
+		const p = normalizePath(pdfPath);
+		return this.pairs[p] ?? p;
+	}
+
+	getFingerprint(pdfPath: string): PdfFingerprint | undefined {
+		return this.fingerprints[normalizePath(pdfPath)];
+	}
+
+	setFingerprint(pdfPath: string, fp: PdfFingerprint): void {
+		const p = normalizePath(pdfPath);
+		const prev = this.fingerprints[p];
+		if (prev && prev.pages === fp.pages && prev.width === fp.width && prev.height === fp.height) return;
+		this.fingerprints[p] = fp;
+		this.save();
+	}
+
+	/** The other member of `pdfPath`'s pair, if one has been established. */
+	counterpartOf(pdfPath: string): string | null {
+		const p = normalizePath(pdfPath);
+		const group = this.pairs[p];
+		if (!group) return null;
+		const other = Object.keys(this.pairs).find((k) => this.pairs[k] === group && k !== p);
+		return other ?? (group === p ? null : group);
+	}
+
+	isPaired(pdfPath: string): boolean {
+		return normalizePath(pdfPath) in this.pairs;
+	}
+
+	/**
+	 * Links two files onto one bucket, merging whatever either already had.
+	 * `canonical` must be one of the two; it names the shared bucket.
+	 */
+	pair(a: string, b: string, canonical: string): void {
+		const pa = normalizePath(a);
+		const pb = normalizePath(b);
+		const key = normalizePath(canonical);
+		if (this.pairs[pa] === key && this.pairs[pb] === key) return;
+
+		const merged = [...(this.data[pa] ?? []), ...(this.data[pb] ?? []), ...(this.data[key] ?? [])];
+		const seen = new Set<string>();
+		const deduped = merged.filter((ann) => !seen.has(ann.id) && seen.add(ann.id));
+
+		if (pa !== key) delete this.data[pa];
+		if (pb !== key) delete this.data[pb];
+		if (deduped.length > 0) this.data[key] = deduped;
+
+		this.pairs[pa] = key;
+		this.pairs[pb] = key;
+		this.save();
+		this.notify();
+	}
+
+	unpair(pdfPath: string): void {
+		const p = normalizePath(pdfPath);
+		const group = this.pairs[p];
+		if (!group) return;
+		for (const k of Object.keys(this.pairs)) if (this.pairs[k] === group) delete this.pairs[k];
+		this.save();
+		this.notify();
 	}
 
 	forPage(pdfPath: string, page: number): PdfAnnotation[] {
@@ -156,11 +237,39 @@ export class PdfAnnotationStore {
 	 * path-string keys would otherwise orphan them silently.
 	 */
 	renameFile(oldPath: string, newPath: string): void {
-		const oldKey = this.key(oldPath);
-		const newKey = this.key(newPath);
-		if (oldKey === newKey || !(oldKey in this.data)) return;
-		this.data[newKey] = [...(this.data[newKey] ?? []), ...this.data[oldKey]];
-		delete this.data[oldKey];
+		const from = normalizePath(oldPath);
+		const to = normalizePath(newPath);
+		if (from === to) return;
+		let touched = false;
+
+		if (this.fingerprints[from]) {
+			this.fingerprints[to] = this.fingerprints[from];
+			delete this.fingerprints[from];
+			touched = true;
+		}
+
+		// Pairing survives a rename on either side: re-key the membership, and if
+		// the renamed file was the group's canonical name, re-point every member.
+		if (this.pairs[from]) {
+			const group = this.pairs[from];
+			this.pairs[to] = group === from ? to : group;
+			delete this.pairs[from];
+			touched = true;
+		}
+		for (const k of Object.keys(this.pairs)) {
+			if (this.pairs[k] === from) {
+				this.pairs[k] = to;
+				touched = true;
+			}
+		}
+
+		if (this.data[from]) {
+			this.data[to] = [...(this.data[to] ?? []), ...this.data[from]];
+			delete this.data[from];
+			touched = true;
+		}
+
+		if (!touched) return;
 		this.save();
 		this.notify();
 	}

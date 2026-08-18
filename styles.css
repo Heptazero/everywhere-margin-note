@@ -457,3 +457,30 @@
 .margin-notes-pdf-list-row .margin-notes-pdf-body {
 	padding-right: 48px;
 }
+
+/* "Shares annotations with <the other language>" banner in the list panel. */
+.margin-notes-pdf-list-pair {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	margin-bottom: 8px;
+	padding: 4px 6px;
+	border-radius: 4px;
+	font-size: 11px;
+	color: var(--text-muted);
+	background: var(--background-secondary);
+	cursor: pointer;
+	word-break: break-word;
+}
+.margin-notes-pdf-list-pair:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+.margin-notes-pdf-list-pair-icon {
+	display: flex;
+	flex: 0 0 auto;
+}
+.margin-notes-pdf-list-pair-icon .svg-icon {
+	width: 12px;
+	height: 12px;
+}

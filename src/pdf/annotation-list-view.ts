@@ -62,6 +62,17 @@ export class AnnotationListView extends ItemView {
 
 		container.createDiv({ cls: "margin-notes-pdf-list-title", text: target.basename });
 
+		// Make a shared-annotation pairing visible: otherwise "why does this
+		// translation already have notes" is a mystery.
+		const counterpart = this.controller.counterpartOfActive();
+		if (counterpart) {
+			const row = container.createDiv({ cls: "margin-notes-pdf-list-pair" });
+			setIcon(row.createSpan({ cls: "margin-notes-pdf-list-pair-icon" }), "arrow-left-right");
+			row.createSpan({ text: `与 ${counterpart.split("/").pop()} 共用批注` });
+			row.setAttribute("aria-label", "点击切换过去(保持页码和位置)");
+			row.addEventListener("click", () => void this.controller.switchToCounterpart());
+		}
+
 		const anns = this.controller.store.forFile(target.path);
 		if (anns.length === 0) {
 			container.createDiv({ cls: "margin-notes-pdf-list-empty", text: "这份 PDF 还没有批注" });

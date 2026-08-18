@@ -11,9 +11,18 @@ import {
 } from "./annotation-settings";
 import { PdfAnnotationStore } from "./annotation-store";
 import { makeAnnotationId, type MarginSide, type PdfAnnotation } from "./annotation-types";
-import { getActivePDFView, onPageReady, onTextLayerReady, type PdfRect } from "./pdf-layer";
+import {
+	canonicalOf,
+	findNameCandidates,
+	fingerprintsPair,
+	ScriptSampler,
+	type PdfFingerprint,
+} from "./counterpart";
+import { getActivePDFView, getPdfDocument, onPageReady, onTextLayerReady, type PdfRect } from "./pdf-layer";
+import { getTextLayerInfo } from "./selection-geom";
 import type { PDFPageView } from "./pdfjs-types";
 import { attachRectSelectListener, type RectSelectController } from "./rect-select";
+import { findScrollAncestor } from "./scroll-container";
 
 /** How a newly created note should appear. */
 export interface NewNoteForm {
@@ -26,6 +35,8 @@ interface ViewState {
 	pages: Map<number, PDFPageView>;
 	layer: AnnotationLayer;
 	currentPath: () => string | null;
+	/** Accumulates the script mix of the open document, for counterpart detection. */
+	sampler: ScriptSampler;
 }
 
 /**
@@ -150,6 +161,109 @@ export class PdfAnnotationsController {
 	}
 
 	/**
+	 * Records what we can see of the open document (page count, page box, script
+	 * mix) and, once both sides of a name-match have been seen, links them.
+	 *
+	 * Everything here comes from the live viewer — nothing loads a second PDF.
+	 * That's why pairing only completes after both files have been opened once,
+	 * which is also the point at which it can be *checked* rather than guessed
+	 * from the filename.
+	 */
+	private captureFingerprint(view: FileView, path: string, state: ViewState): void {
+		if (!state.sampler.hasSample) return;
+		const pageView = state.pages.values().next().value;
+		const doc = getPdfDocument(view);
+		if (!pageView?.pdfPage?.view || !doc) return;
+
+		const [x0, y0, x1, y1] = pageView.pdfPage.view;
+		const fp: PdfFingerprint = {
+			pages: doc.numPages,
+			width: Math.round(x1 - x0),
+			height: Math.round(y1 - y0),
+			cjk: state.sampler.ratio,
+		};
+		this.store.setFingerprint(path, fp);
+		this.tryAutoPair(path, fp);
+	}
+
+	/** Links `path` to a same-named counterpart whose fingerprint proves it's a
+	 * translation with the same layout. Silent when nothing qualifies. */
+	private tryAutoPair(path: string, fp: PdfFingerprint): void {
+		if (this.store.isPaired(path)) return;
+		for (const candidate of findNameCandidates(this.app, path)) {
+			const other = this.store.getFingerprint(candidate);
+			if (!other || !fingerprintsPair(fp, other)) continue;
+			this.store.pair(path, candidate, canonicalOf(path, fp, candidate, other));
+			new Notice(`已关联原文/译文,批注共用:\n${candidate.split("/").pop()}`);
+			return;
+		}
+	}
+
+	/** The paired original/translation of the PDF in focus, if any. */
+	counterpartOfActive(): string | null {
+		const file = this.currentPdfTarget();
+		return file ? this.store.counterpartOf(file.path) : null;
+	}
+
+	/**
+	 * Flips to the paired translation/original, landing on the same page and the
+	 * same fraction down that page — the layouts match closely enough (measured
+	 * on this vault: 1pt median vertical drift, 93% of blocks within one line)
+	 * that this reads as switching language in place.
+	 */
+	async switchToCounterpart(): Promise<void> {
+		const view = this.targetPdfView();
+		const file = this.currentPdfTarget();
+		if (!view || !file) return;
+
+		const other = this.store.counterpartOf(file.path);
+		if (!other) {
+			new Notice("没有找到关联的原文/译文——两份都打开过一次之后才能自动识别");
+			return;
+		}
+
+		const state = this.states.get(view);
+		const page = this.visiblePage(state) ?? 1;
+		const fraction = this.pageScrollFraction(state, page);
+
+		await this.app.workspace.openLinkText(`${other}#page=${page}`, "", false);
+		if (fraction === null) return;
+		// Re-apply the within-page offset once the target page has rendered.
+		window.setTimeout(() => this.applyPageFraction(page, fraction), 400);
+	}
+
+	/** Whichever page currently occupies most of the viewport. */
+	private visiblePage(state: ViewState | undefined): number | null {
+		if (!state) return null;
+		let best: { page: number; area: number } | null = null;
+		for (const [page, pv] of state.pages) {
+			if (!pv.div.isConnected) continue;
+			const r = pv.div.getBoundingClientRect();
+			const visible = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+			if (!best || visible > best.area) best = { page, area: visible };
+		}
+		return best?.page ?? null;
+	}
+
+	/** How far down the given page the viewport sits, 0–1. */
+	private pageScrollFraction(state: ViewState | undefined, page: number): number | null {
+		const pv = state?.pages.get(page);
+		if (!pv?.div.isConnected) return null;
+		const r = pv.div.getBoundingClientRect();
+		if (r.height <= 0) return null;
+		return Math.max(0, Math.min(1, -r.top / r.height));
+	}
+
+	private applyPageFraction(page: number, fraction: number): void {
+		const view = this.targetPdfView();
+		const pv = view ? this.states.get(view)?.pages.get(page) : null;
+		if (!pv?.div.isConnected) return;
+		const scroller = findScrollAncestor(pv.div);
+		const r = pv.div.getBoundingClientRect();
+		scroller.scrollTop += r.top + fraction * r.height - scroller.getBoundingClientRect().top;
+	}
+
+	/**
 	 * Opens the PDF at the note's page, then flashes it.
 	 *
 	 * Reuses the leaf the PDF is already in (the common case — you're browsing
@@ -241,7 +355,8 @@ export class PdfAnnotationsController {
 			return file.path;
 		};
 
-		this.states.set(view, { pages, layer, currentPath });
+		const state: ViewState = { pages, layer, currentPath, sampler: new ScriptSampler() };
+		this.states.set(view, state);
 		component.register(() => layer.destroy());
 
 		const trackedPageDivs = new WeakSet<HTMLDivElement>();
@@ -271,7 +386,21 @@ export class PdfAnnotationsController {
 			if (!pageView.pdfPage?.view) return;
 			pages.set(pageNumber, pageView);
 			const path = currentPath();
-			if (path) layer.rebuild(path, pages);
+			if (!path) return;
+			layer.rebuild(path, pages);
+
+			// The text layer is also the free sample of what script this document
+			// is written in — all counterpart detection needs, no extra parsing.
+			if (!state.sampler.done) {
+				const info = getTextLayerInfo(pageView);
+				if (info) {
+					state.sampler.add(
+						pageNumber,
+						info.textContentItems.map((i) => i.str)
+					);
+					if (state.sampler.done) this.captureFingerprint(view, path, state);
+				}
+			}
 		});
 	}
 }
