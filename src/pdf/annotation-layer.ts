@@ -1,4 +1,4 @@
-import { Menu, type App, type Component } from "obsidian";
+import { Menu, Notice, type App, type Component } from "obsidian";
 import { resolveCollisions } from "../collision-avoidance";
 import { buildAnnotationBox, type AnnotationBoxHandle } from "./annotation-box";
 import { highlightsBothWays, type PdfAnnotationSettings } from "./annotation-settings";
@@ -48,6 +48,9 @@ const MIN_RAIL_WIDTH_PT = 50;
 const MIN_FREE_WIDTH_PT = 40;
 const MIN_HEIGHT_PX = 20;
 const REBUILD_DEBOUNCE_MS = 60;
+/** How far the arrow's end has to be pulled before it is worth explaining that
+ * dragging is not how a highlight gets moved. Below this it reads as a slip. */
+const REANCHOR_HINT_PX = 24;
 
 /** Page geometry in scroll-container coordinates, plus the pt→px zoom factor. */
 interface PageBox {
@@ -570,7 +573,8 @@ export class AnnotationLayer {
 			if (resolved) {
 				ann.anchor = resolved;
 				ann.updatedAt = Date.now();
-				this.store.upsert(pdfPath, ann);
+				// Not a user edit — keep it out of the undo history.
+				this.store.upsert(pdfPath, ann, false);
 				return resolved;
 			}
 		}
@@ -1243,7 +1247,7 @@ export class AnnotationLayer {
 		const line = layer.createDiv("margin-notes-pdf-leader");
 		const knob = layer.createDiv("margin-notes-pdf-leader-knob");
 		for (const n of [line, knob]) n.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
-		knob.setAttribute("aria-label", "拖动这一端可以移动高亮的位置");
+		knob.setAttribute("aria-label", "这一端指向原文;高亮范围要改请用菜单里的「重新指定高亮位置」");
 
 		const parts: LeaderParts = { line, knob, noteEl: el, pageView, ann, a: { ...a } };
 		this.leaders.set(ann.id, parts);
@@ -1291,51 +1295,44 @@ export class AnnotationLayer {
 	}
 
 	/**
-	 * Drags the arrow's TEXT end, which moves the highlighted region — not the
-	 * note. Grabbing the line to move the note was the wrong model: the note
-	 * already has a grip, and what has no other handle is the anchor.
+	 * The arrow's text end can be pulled, but pulling it does NOT move the
+	 * highlight: on release the leader springs back to the anchor.
 	 *
-	 * The whole anchor box is translated by the cursor delta, so a highlight that
-	 * landed on the wrong line can be nudged onto the right one. `quote` is
-	 * cleared on commit for the same reason `reanchor` clears it: once a human
-	 * has placed the box, a later quote re-resolution must not overwrite it.
-	 * (To re-pick a text span exactly, re-select the text and use 「重新指定高亮
-	 * 位置」 — dragging is for nudging, selection is for re-choosing.)
+	 * A highlight records where something actually IS in the document. Letting a
+	 * stray drag silently redefine that loses the real location with no warning
+	 * and no way to tell it happened — and this knob sits right on the page, easy
+	 * to catch by accident. So the drag is a rubber band: it shows the connection
+	 * while held, then returns. Pulled well clear of the anchor it also says how
+	 * to change the highlight for real, since that is plainly what was intended.
+	 *
+	 * Re-anchoring stays an explicit act: select the text (or drag a box) and use
+	 * 「重新指定高亮位置」.
 	 */
 	private beginAnchorDrag(ev: PointerEvent, p: LeaderParts): void {
 		ev.preventDefault();
 		ev.stopPropagation();
-		const pdfPath = this.last?.pdfPath;
-		const box = this.currentPageBox(p.pageView);
-		if (!pdfPath || !box) return;
 
 		const startX = ev.clientX;
 		const startY = ev.clientY;
-		const start = { ...p.a };
-		const startAnchor: PdfRect = [...p.ann.anchor];
+		const home = { ...p.a };
 		p.knob.addClass("is-dragging");
 
 		const onMove = (m: PointerEvent) => {
 			const dx = m.clientX - startX;
 			const dy = m.clientY - startY;
-			p.a = { x0: start.x0 + dx, x1: start.x1 + dx, y0: start.y0 + dy, y1: start.y1 + dy };
+			p.a = { x0: home.x0 + dx, x1: home.x1 + dx, y0: home.y0 + dy, y1: home.y1 + dy };
 			this.positionLeader(p);
 		};
 		const onUp = (u: PointerEvent) => {
 			window.removeEventListener("pointermove", onMove);
 			p.knob.removeClass("is-dragging");
-			// px → PDF points. Y is inverted: PDF points grow upwards, screen down.
-			const dxPt = (u.clientX - startX) / box.zoom;
-			const dyPt = -(u.clientY - startY) / box.zoom;
-			this.mutate(pdfPath, p.ann, (ann) => {
-				ann.anchor = [
-					startAnchor[0] + dxPt,
-					startAnchor[1] + dyPt,
-					startAnchor[2] + dxPt,
-					startAnchor[3] + dyPt,
-				];
-				ann.quote = undefined;
-			});
+			const dragged = Math.hypot(u.clientX - startX, u.clientY - startY);
+			// Snap back — the anchor is never written by this gesture.
+			p.a = home;
+			this.positionLeader(p);
+			if (dragged >= REANCHOR_HINT_PX) {
+				new Notice("高亮位置不会被拖动改变。要改的话:选中新的文字,再用批注菜单里的「重新指定高亮位置」");
+			}
 		};
 		window.addEventListener("pointermove", onMove);
 		window.addEventListener("pointerup", onUp, { once: true });

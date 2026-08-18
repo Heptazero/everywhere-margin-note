@@ -39,6 +39,10 @@ export type StoreListener = () => void;
  * Written through `vault.adapter` rather than the `TFile` API because a
  * dot-prefixed folder isn't part of Obsidian's indexed file tree.
  */
+/** Enough to cover a working session's worth of edits without holding a vault's
+ * annotation history in memory forever. */
+const MAX_HISTORY = 100;
+
 export class PdfAnnotationStore {
 	private data: Record<string, PdfAnnotation[]> = {};
 	private pairs: Record<string, string> = {};
@@ -46,6 +50,22 @@ export class PdfAnnotationStore {
 	private path = "";
 	private listeners = new Set<StoreListener>();
 	private save = debounce(() => void this.flush(), 500, true);
+	/**
+	 * Undo history of whole-annotation-map snapshots.
+	 *
+	 * Snapshots rather than inverse operations: the mutations here are few and
+	 * the data is small (a vault's worth of annotations is kilobytes), so the
+	 * simplest thing that cannot get out of step with the live data is to keep
+	 * copies. An operation log would need an exact inverse for every future
+	 * mutation, and one missing inverse corrupts everything after it.
+	 *
+	 * `pairs`/`fingerprints` are deliberately NOT covered: they describe which
+	 * files belong together, not the user's writing, and silently un-pairing two
+	 * documents because someone pressed Cmd+Z after deleting a note would be a
+	 * surprise rather than an undo.
+	 */
+	private undoStack: Record<string, PdfAnnotation[]>[] = [];
+	private redoStack: Record<string, PdfAnnotation[]>[] = [];
 
 	constructor(
 		private app: App,
@@ -65,7 +85,49 @@ export class PdfAnnotationStore {
 		for (const l of this.listeners) l();
 	}
 
+	private snapshot(): Record<string, PdfAnnotation[]> {
+		const copy: Record<string, PdfAnnotation[]> = {};
+		for (const [k, list] of Object.entries(this.data)) copy[k] = list.map((a) => ({ ...a }));
+		return copy;
+	}
+
+	/** Call immediately BEFORE mutating `data`. Any new edit invalidates redo. */
+	private pushHistory(): void {
+		this.undoStack.push(this.snapshot());
+		if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
+		this.redoStack.length = 0;
+	}
+
+	get canUndo(): boolean {
+		return this.undoStack.length > 0;
+	}
+	get canRedo(): boolean {
+		return this.redoStack.length > 0;
+	}
+
+	undo(): boolean {
+		const prev = this.undoStack.pop();
+		if (!prev) return false;
+		this.redoStack.push(this.snapshot());
+		this.data = prev;
+		this.save();
+		this.notify();
+		return true;
+	}
+
+	redo(): boolean {
+		const next = this.redoStack.pop();
+		if (!next) return false;
+		this.undoStack.push(this.snapshot());
+		this.data = next;
+		this.save();
+		this.notify();
+		return true;
+	}
+
 	private adopt(parsed: Partial<FileShape>): void {
+		this.undoStack.length = 0;
+		this.redoStack.length = 0;
 		this.data = {};
 		for (const [key, list] of Object.entries(parsed?.pdfAnnotations ?? {})) {
 			this.data[key] = ((list ?? []) as unknown[]).map((a) => normalizeAnnotation(a as never));
@@ -210,20 +272,38 @@ export class PdfAnnotationStore {
 		this.notify();
 	}
 
+	/**
+	 * Readers get COPIES, never the stored objects.
+	 *
+	 * Callers edit an annotation in place and then hand it back to `upsert`
+	 * (see the layer's `mutate`). If that were the same object the store holds,
+	 * the edit would already be applied to the store's own state by the time
+	 * `upsert` ran — so the "before" snapshot taken there would capture the
+	 * edited value, and undoing a text/colour/position change would silently do
+	 * nothing (only add and delete would ever work). Copying on the way out is
+	 * what makes the stored state genuinely the previous one.
+	 */
 	forPage(pdfPath: string, page: number): PdfAnnotation[] {
-		return (this.data[this.key(pdfPath)] ?? []).filter((a) => a.page === page);
+		return (this.data[this.key(pdfPath)] ?? []).filter((a) => a.page === page).map((a) => ({ ...a }));
 	}
 
 	forFile(pdfPath: string): PdfAnnotation[] {
-		return this.data[this.key(pdfPath)] ?? [];
+		return (this.data[this.key(pdfPath)] ?? []).map((a) => ({ ...a }));
 	}
 
-	upsert(pdfPath: string, ann: PdfAnnotation): void {
+	/**
+	 * `recordHistory: false` for writes the user did not perform — currently the
+	 * automatic quote→anchor resolution, which would otherwise fill the undo
+	 * stack with entries that undo something nobody did.
+	 */
+	upsert(pdfPath: string, ann: PdfAnnotation, recordHistory = true): void {
+		if (recordHistory) this.pushHistory();
 		const key = this.key(pdfPath);
 		const list = (this.data[key] ??= []);
+		const stored = { ...ann };
 		const idx = list.findIndex((a) => a.id === ann.id);
-		if (idx >= 0) list[idx] = ann;
-		else list.push(ann);
+		if (idx >= 0) list[idx] = stored;
+		else list.push(stored);
 		this.save();
 		this.notify();
 	}
@@ -232,6 +312,7 @@ export class PdfAnnotationStore {
 		const key = this.key(pdfPath);
 		const list = this.data[key];
 		if (!list) return;
+		this.pushHistory();
 		this.data[key] = list.filter((a) => a.id !== id);
 		this.save();
 		this.notify();

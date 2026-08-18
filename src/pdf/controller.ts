@@ -131,6 +131,23 @@ export class PdfAnnotationsController {
 		void this.saveSettings({ ...this.settings, ...patch });
 	}
 
+	/**
+	 * Undo/redo for annotation edits. Reported back so the command can decline
+	 * the keystroke when there is nothing to undo — see main.ts for why that
+	 * matters for a shortcut as heavily shared as Cmd+Z.
+	 */
+	undo(): boolean {
+		const ok = this.store.undo();
+		if (!ok) new Notice("没有可撤销的批注修改");
+		return ok;
+	}
+
+	redo(): boolean {
+		const ok = this.store.redo();
+		if (!ok) new Notice("没有可重做的批注修改");
+		return ok;
+	}
+
 	/** A suggester, not a floating menu — see HighlightModePicker. */
 	chooseHighlightMode(): void {
 		new HighlightModePicker(this.app, this.settings.highlightMode, (mode) =>

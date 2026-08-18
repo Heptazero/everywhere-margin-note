@@ -29,6 +29,32 @@ export default class MarginNotesPlugin extends Plugin {
 		this.addPdfNoteCommand("pdf-add-note-left", "[PDF] 加批注:左侧轨道", { pinned: true, side: "left", collapsed: false });
 		this.addPdfNoteCommand("pdf-add-note-free", "[PDF] 加批注:自由摆放(便利贴)", { pinned: false, side: "right", collapsed: false });
 
+		// Bound to the system undo/redo keys, but claimed ONLY while a PDF view has
+		// focus and there is actually something to undo: checkCallback returning
+		// false leaves the keystroke to whoever else wants it, so Cmd+Z keeps
+		// working normally in the editor and everywhere else.
+		this.addCommand({
+			id: "pdf-undo",
+			name: "[PDF] 撤销批注修改",
+			hotkeys: [{ modifiers: ["Mod"], key: "z" }],
+			checkCallback: (checking) => {
+				const can = this.pdfAnnotations.hasActivePDFView() && this.pdfAnnotations.store.canUndo;
+				if (!checking && can) this.pdfAnnotations.undo();
+				return can;
+			},
+		});
+
+		this.addCommand({
+			id: "pdf-redo",
+			name: "[PDF] 重做批注修改",
+			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "z" }],
+			checkCallback: (checking) => {
+				const can = this.pdfAnnotations.hasActivePDFView() && this.pdfAnnotations.store.canRedo;
+				if (!checking && can) this.pdfAnnotations.redo();
+				return can;
+			},
+		});
+
 		this.addCommand({
 			id: "pdf-highlight-mode",
 			name: "[PDF] 切换高亮显示方式",
