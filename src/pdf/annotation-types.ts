@@ -53,7 +53,13 @@ export interface PdfAnnotation {
 	/** Omitted = height follows the text. */
 	freeH?: number;
 
-	/** Pinned only: manual vertical nudge in px, applied on top of the anchor position. */
+	/**
+	 * Pinned only: manual vertical nudge, in PDF points (like `anchor`), applied
+	 * on top of the anchor position. Was raw px before v0.10.0 — at 100% zoom a
+	 * point and a px are the same number, so old values keep rendering
+	 * identically there; the fix is only visible at other zoom levels, where the
+	 * nudge now scales with the note's own anchor instead of staying frozen.
+	 */
 	offsetY?: number;
 	/** Per-note font multiplier over the global size. */
 	fontScale?: number;

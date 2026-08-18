@@ -15,6 +15,9 @@ function isUnresolvedAnchor(anchor: PdfRect): boolean {
 }
 
 const LAYER_CLASS = "margin-notes-pdf-layer";
+/** Minimum vertical gap between two rail notes, in PDF points (scaled by zoom
+ * where it's used) — not raw px, or it would look cramped zoomed in and
+ * oversized zoomed out relative to the (zoom-scaled) text around it. */
 const MIN_GAP = 8;
 /** Blank space kept past the outermost note, so it never sits under the viewer's scrollbar. */
 const OUTER_MARGIN_PX = 28;
@@ -53,6 +56,9 @@ interface Rail {
 	top: number;
 	height: number;
 	el: HTMLElement;
+	/** The page's zoom at push time, so the minimum gap between notes (below)
+	 * can scale with it instead of staying a fixed px amount at every zoom. */
+	zoom: number;
 }
 
 /** One rendered annotation, kept so geometry can be re-measured after rendering. */
@@ -253,7 +259,7 @@ export class AnnotationLayer {
 				} else {
 					maxRight = Math.max(maxRight, left + DOT_SIZE_PX);
 				}
-				rails[ann.side].push({ id: ann.id, top: this.anchorTop(ann, box), height: 0, el });
+				rails[ann.side].push({ id: ann.id, top: this.anchorTop(ann, box), height: 0, el, zoom: box.zoom });
 			} else if (ann.collapsed) {
 				const left = box.left + (this.freeXPct(ann, box) / 100) * box.width;
 				el.style.left = `${left}px`;
@@ -269,7 +275,12 @@ export class AnnotationLayer {
 		for (const side of ["left", "right"] as const) {
 			const group = rails[side];
 			for (const r of group) r.height = r.el.offsetHeight;
-			for (const r of resolveCollisions(group, MIN_GAP)) r.el.style.top = `${r.top}px`;
+			// MIN_GAP is a page-point constant like everything else here — a fixed
+			// px value would look cramped zoomed in and oversized zoomed out. All
+			// notes in one rail share the document's zoom in practice, so the
+			// first entry's is representative.
+			const gapPx = MIN_GAP * (group[0]?.zoom ?? 1);
+			for (const r of resolveCollisions(group, gapPx)) r.el.style.top = `${r.top}px`;
 		}
 
 		// Give the layer a real width so the scroll container can actually reach
@@ -300,10 +311,18 @@ export class AnnotationLayer {
 			: Math.max(0, box.left - railWidthPx - railGapPx);
 	}
 
-	/** Vertical position derived from the anchor (plus any manual nudge). */
+	/**
+	 * Vertical position derived from the anchor (plus any manual nudge).
+	 * `offsetY` is stored in PDF points, like `anchor` itself — converting it to
+	 * px here (× `box.zoom`) rather than storing raw px is what keeps a manually
+	 * reordered rail note's position relative to its neighbours stable across
+	 * zoom. It used to be stored as raw px: fine at the zoom it was dragged at,
+	 * but frozen afterwards while every neighbour's own position kept scaling —
+	 * that mismatch is what could reorder or bunch up notes after zooming.
+	 */
 	private anchorTop(ann: PdfAnnotation, box: PageBox): number {
 		const topPt = box.ptY1 - Math.max(ann.anchor[1], ann.anchor[3]);
-		return box.top + (topPt / box.ptHeight) * box.height + (ann.offsetY ?? 0);
+		return box.top + (topPt / box.ptHeight) * box.height + (ann.offsetY ?? 0) * box.zoom;
 	}
 
 	/**
@@ -588,9 +607,15 @@ export class AnnotationLayer {
 				// Measured now, not at build time: a zoom may have happened since.
 				const box = this.currentPageBox(pageView);
 				this.mutate(pdfPath, ann, (a) => {
-					if (a.pinned || !box) {
-						a.offsetY = (a.offsetY ?? 0) + dy;
-					} else {
+					if (a.pinned) {
+						// Stored in PDF points, like everything else here — a raw-px
+						// offset would stay fixed size on screen while the note's own
+						// anchor position (and its neighbours') keeps scaling with
+						// zoom, which is what could reorder/bunch up a rail after
+						// zooming. See anchorTop(). Falls back to raw px only in the
+						// edge case where the page isn't measurable right now.
+						a.offsetY = (a.offsetY ?? 0) + (box ? dy / box.zoom : dy);
+					} else if (box) {
 						a.freeX = ((startLeft + dx - box.left) / box.width) * 100;
 						a.freeY = ((startTop + dy - box.top) / box.height) * 100;
 					}
