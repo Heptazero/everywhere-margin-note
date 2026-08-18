@@ -575,12 +575,43 @@ export class AnnotationLayer {
 	}
 
 	/**
-	 * Un-pinning leaves freeX/freeY unset (unless already dragged somewhere)
-	 * rather than jumping to a hardcoded corner — freeXPct/freeYPct's default
-	 * already places an unset note right next to its anchor, which is exactly
-	 * where a note that just left the rail should start.
+	 * Un-pinning freezes the note exactly where it currently sits — same spot,
+	 * same width — by reading its rendered box and writing that back as
+	 * freeX/freeY/freeW.
+	 *
+	 * Leaving those unset (the previous behaviour) meant falling through to
+	 * freeXPct/freeYPct's DEFAULTS, which are derived from the anchor. For a note
+	 * in a rail that is nowhere near where it was: horizontally it teleports from
+	 * the rail lane back beside its source text, and vertically it loses both its
+	 * manual `offsetY` nudge and whatever displacement collision avoidance had
+	 * given it. "Unpin" should mean "stop being in the lane", not "jump somewhere
+	 * else" — from wherever it lands, dragging it is easy.
+	 *
+	 * `el.style.top` is read after the collision pass has written to it, so it is
+	 * the note's true resolved position, not its pre-collision anchor position.
 	 */
 	private togglePin(pdfPath: string, ann: PdfAnnotation): void {
+		if (ann.pinned) {
+			const el = this.layer?.querySelector<HTMLElement>(`[data-annotation-id="${ann.id}"]`);
+			const pageView = this.last?.pages.get(ann.page);
+			const box = pageView ? this.currentPageBox(pageView) : null;
+			if (el && box && box.width > 0 && box.height > 0) {
+				const left = parseFloat(el.style.left || "0");
+				const top = parseFloat(el.style.top || "0");
+				// offsetWidth is unscaled (the zoom lives in the transform), so it
+				// has to be scaled up before being expressed as a page percentage.
+				const widthPx = el.offsetWidth * box.zoom;
+				this.mutate(pdfPath, ann, (a) => {
+					a.pinned = false;
+					a.freeX = ((left - box.left) / box.width) * 100;
+					a.freeY = ((top - box.top) / box.height) * 100;
+					a.freeW = (widthPx / box.width) * 100;
+					// Now baked into freeY; leaving it would re-apply on a later re-pin.
+					a.offsetY = 0;
+				});
+				return;
+			}
+		}
 		this.mutate(pdfPath, ann, (a) => {
 			if (a.pinned) {
 				a.pinned = false;
