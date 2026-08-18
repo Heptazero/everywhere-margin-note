@@ -126,6 +126,10 @@ export class AnnotationLayer {
 		if (this.layer?.isConnected && this.scroller === scroller) return this.layer;
 
 		this.layer?.remove();
+		// Hand the previous scroller back the padding we borrowed from it before
+		// losing the reference, or the old viewer keeps a gutter for a rail that
+		// is no longer there.
+		if (this.scroller && this.scroller !== scroller) this.applyLeftGutter(this.scroller, 0);
 		// CM6's `.cm-scroller` gets `position: relative` from its own base theme;
 		// nothing gives the PDF viewer's scroller that for free.
 		if (getComputedStyle(scroller).position === "static") scroller.style.position = "relative";
@@ -272,6 +276,10 @@ export class AnnotationLayer {
 		const scroller = this.scroller;
 		if (!scroller) return;
 
+		// Reserve room for the left rail BEFORE measuring anything — it shifts the
+		// pages, so every rect read afterwards has to already account for it.
+		this.applyLeftGutter(scroller, this.leftGutterFor(built, settings, scroller));
+
 		const scrollerRect = scroller.getBoundingClientRect();
 		const boxes = new Map<PDFPageView, PageBox>();
 		const rails: Record<MarginSide, Rail[]> = { left: [], right: [] };
@@ -335,6 +343,42 @@ export class AnnotationLayer {
 		// note — whichever kind it happens to be — rather than by the rail.
 		const right = Math.max(maxRight, this.measuredRight(built, scroller));
 		this.layer!.style.width = right > 0 ? `${right + OUTER_MARGIN_PX}px` : "";
+	}
+
+	/**
+	 * How much blank space the left rail needs beside the pages, in px.
+	 *
+	 * The right rail never needed this: notes past the right page edge simply
+	 * extend the layer's width and the container scrolls to them. The left has no
+	 * such freedom, because scroll offsets cannot go below zero — so `railLeft`
+	 * clamps at 0, and once the page's own left gutter is smaller than the rail
+	 * needs (which is exactly what zooming in does: the page grows until it fills
+	 * the viewport and the gutter reaches zero), EVERY left note clamps to the
+	 * same x and stacks up against the page edge, losing its position entirely.
+	 * That asymmetry is why the left collapsed on zoom while the right was fine.
+	 *
+	 * Clamping was treating the symptom. The fix is to make the space exist:
+	 * padding on the scroll container pushes the pages right, so there is always
+	 * a real gutter to sit in and the clamp never fires. This is deliberately
+	 * derived only from the rail's own settings and the zoom — never from a
+	 * measured page position — because padding changes page positions, and
+	 * feeding those back in would oscillate.
+	 */
+	private leftGutterFor(built: Placed[], settings: PdfAnnotationSettings, scroller: HTMLElement): number {
+		if (!built.some((b) => b.ann.pinned && b.ann.side === "left")) return 0;
+
+		const page = built.find((b) => b.pageView.div.isConnected && b.pageView.pdfPage?.view)?.pageView;
+		if (!page) return 0;
+		const zoom = this.pageBox(page, scroller, scroller.getBoundingClientRect()).zoom;
+
+		const needed = (this.railWidthPt(settings, "left") + this.railGapPt(settings, "left")) * zoom;
+		return Math.max(0, needed + OUTER_MARGIN_PX);
+	}
+
+	/** Idempotent so a re-layout with an unchanged gutter doesn't thrash pdf.js. */
+	private applyLeftGutter(scroller: HTMLElement, px: number): void {
+		const want = px > 0 ? `${Math.ceil(px)}px` : "";
+		if (scroller.style.paddingLeft !== want) scroller.style.paddingLeft = want;
 	}
 
 	/** Rightmost rendered edge of any placed note, in scroll-container px. */
@@ -1017,7 +1061,11 @@ export class AnnotationLayer {
 	destroy(): void {
 		window.clearTimeout(this.rebuildTimer);
 		this.hoverMark = null;
+		// The gutter lives on pdf.js's own element, not ours — it has to be undone
+		// explicitly, unlike the layer, which disappears with its own node.
+		if (this.scroller) this.applyLeftGutter(this.scroller, 0);
 		this.layer?.remove();
 		this.layer = null;
+		this.scroller = null;
 	}
 }
