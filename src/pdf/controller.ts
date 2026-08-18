@@ -24,6 +24,8 @@ import { getActivePDFView, getPdfDocument, onPageReady, onTextLayerReady, type P
 import { getTextLayerInfo } from "./selection-geom";
 import type { PDFPageView } from "./pdfjs-types";
 import { attachRectSelectListener, type RectSelectController } from "./rect-select";
+import { headlessFingerprint } from "./headless-fingerprint";
+import { isPdf } from "./counterpart";
 import { findScrollAncestor } from "./scroll-container";
 
 /** How long to wait for the target page to render before correcting scroll
@@ -169,12 +171,9 @@ export class PdfAnnotationsController {
 
 	/**
 	 * Records what we can see of the open document (page count, page box, script
-	 * mix) and, once both sides of a name-match have been seen, links them.
-	 *
-	 * Everything here comes from the live viewer — nothing loads a second PDF.
-	 * That's why pairing only completes after both files have been opened once,
-	 * which is also the point at which it can be *checked* rather than guessed
-	 * from the filename.
+	 * mix) — this side is always read off the live viewer, no separate load.
+	 * Hands off to tryAutoPair, which fingerprints the OTHER side headlessly if
+	 * it needs to (see headlessFingerprintCandidate).
 	 */
 	private captureFingerprint(view: FileView, path: string, state: ViewState): void {
 		if (!state.sampler.hasSample) return;
@@ -193,17 +192,61 @@ export class PdfAnnotationsController {
 		this.tryAutoPair(path, fp);
 	}
 
-	/** Links `path` to a same-named counterpart whose fingerprint proves it's a
-	 * translation with the same layout. Silent when nothing qualifies. */
+	/**
+	 * Links `path` to a same-named counterpart whose fingerprint proves it's a
+	 * translation with the same layout.
+	 *
+	 * A candidate that hasn't been fingerprinted yet doesn't just get skipped —
+	 * it's fetched headlessly (no tab, no visible view) so pairing completes
+	 * without the user ever having to manually open the other side. This only
+	 * runs after `path` itself was just fingerprinted, which means a PDF has
+	 * already been opened this session, which is the one precondition
+	 * `headlessFingerprint` needs (`window.pdfjsLib` loads lazily on first PDF
+	 * open) — so by the time this fires, it's essentially always available.
+	 */
 	private tryAutoPair(path: string, fp: PdfFingerprint): void {
 		if (this.store.isPaired(path)) return;
 		for (const candidate of findNameCandidates(this.app, path)) {
 			const other = this.store.getFingerprint(candidate);
-			if (!other || !fingerprintsPair(fp, other)) continue;
-			this.store.pair(path, candidate, canonicalOf(path, fp, candidate, other));
-			new Notice(`已关联原文/译文,批注共用:\n${candidate.split("/").pop()}`);
-			return;
+			if (other) {
+				if (this.completePairIfMatch(path, fp, candidate, other)) return;
+				continue;
+			}
+			this.headlessFingerprintCandidate(path, fp, candidate);
 		}
+	}
+
+	private completePairIfMatch(path: string, fp: PdfFingerprint, candidate: string, other: PdfFingerprint): boolean {
+		if (!fingerprintsPair(fp, other)) return false;
+		this.store.pair(path, candidate, canonicalOf(path, fp, candidate, other));
+		new Notice(`已自动关联原文/译文,批注共用:\n${candidate.split("/").pop()}`);
+		return true;
+	}
+
+	/**
+	 * In-flight headless fetches, keyed by candidate path — a Map of Promises
+	 * rather than a Set of booleans so two things can share it: dedup (opening a
+	 * PDF twice, or two name-candidates both pointing at the same unfingerprinted
+	 * file, shouldn't fetch it twice) AND `switchToCounterpart` being able to
+	 * actually *wait* on one instead of just checking whether it's running.
+	 */
+	private headlessInFlight = new Map<string, Promise<void>>();
+
+	private headlessFingerprintCandidate(path: string, fp: PdfFingerprint, candidate: string): Promise<void> {
+		const existing = this.headlessInFlight.get(candidate);
+		if (existing) return existing;
+		const file = this.app.vault.getAbstractFileByPath(candidate);
+		if (!isPdf(file)) return Promise.resolve();
+
+		const promise = headlessFingerprint(this.app, file)
+			.then((other) => {
+				if (!other) return;
+				this.store.setFingerprint(candidate, other);
+				if (!this.store.isPaired(path)) this.completePairIfMatch(path, fp, candidate, other);
+			})
+			.finally(() => this.headlessInFlight.delete(candidate));
+		this.headlessInFlight.set(candidate, promise);
+		return promise;
 	}
 
 	/** The paired original/translation of the PDF in focus, if any. */
@@ -222,9 +265,12 @@ export class PdfAnnotationsController {
 		if (!mine) {
 			return "当前 PDF 还没采集到指纹(等文字层渲染完再试一次)。";
 		}
-		const unopened = candidates.filter((c) => !this.store.getFingerprint(c));
-		if (unopened.length > 0) {
-			return `找到候选:${unopened[0].split("/").pop()}\n但它还没被打开过——打开一次就会自动关联。`;
+		const unfingerprinted = candidates.filter((c) => !this.store.getFingerprint(c));
+		if (unfingerprinted.length > 0) {
+			const stillFetching = unfingerprinted.some((c) => this.headlessInFlight.has(c));
+			return stillFetching
+				? `找到候选:${unfingerprinted[0].split("/").pop()}\n正在后台读取它的页数/语种,马上再试一次。`
+				: `找到候选:${unfingerprinted[0].split("/").pop()}\n但读取失败了(可能不是有效 PDF,或读取时出错)。\n可以用「手动关联」命令跳过校验直接指定。`;
 		}
 		for (const c of candidates) {
 			const other = this.store.getFingerprint(c)!;
@@ -296,12 +342,26 @@ export class PdfAnnotationsController {
 
 		let other = this.store.counterpartOf(file.path);
 		if (!other) {
-			// Retry the match now (the other side may have been opened since), and
-			// if it still won't pair, say exactly which check failed — "not found"
-			// gave no way to tell a naming problem from a never-opened counterpart.
+			// Retry the match now (the other side may have been opened since, or
+			// this call is itself what kicks off its headless fetch), and if a
+			// fetch is running for a name-candidate, actually wait on it rather
+			// than immediately reporting "not paired yet" — this is the difference
+			// between the switch command working on the first try vs. needing a
+			// second press a moment later.
 			const fp = this.store.getFingerprint(file.path);
-			if (fp) this.tryAutoPair(file.path, fp);
-			other = this.store.counterpartOf(file.path);
+			if (fp) {
+				this.tryAutoPair(file.path, fp);
+				other = this.store.counterpartOf(file.path);
+				if (!other) {
+					const pending = findNameCandidates(this.app, file.path)
+						.map((c) => this.headlessInFlight.get(c))
+						.filter((p): p is Promise<void> => !!p);
+					if (pending.length > 0) {
+						await Promise.race([Promise.all(pending), new Promise((r) => window.setTimeout(r, 4000))]);
+						other = this.store.counterpartOf(file.path);
+					}
+				}
+			}
 		}
 		if (!other) {
 			new Notice(this.explainNoCounterpart(file.path), 8000);
