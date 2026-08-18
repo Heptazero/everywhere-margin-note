@@ -13,8 +13,10 @@ import { PdfAnnotationStore } from "./annotation-store";
 import { makeAnnotationId, type MarginSide, type PdfAnnotation } from "./annotation-types";
 import {
 	canonicalOf,
+	differentLanguage,
 	findNameCandidates,
 	fingerprintsPair,
+	sameGeometry,
 	ScriptSampler,
 	type PdfFingerprint,
 } from "./counterpart";
@@ -205,6 +207,69 @@ export class PdfAnnotationsController {
 		return file ? this.store.counterpartOf(file.path) : null;
 	}
 
+	/** Names the specific check that stopped a pairing, so it can be acted on. */
+	private explainNoCounterpart(path: string): string {
+		const candidates = findNameCandidates(this.app, path);
+		if (candidates.length === 0) {
+			return "没有找到名字相近的另一份 PDF。\n可以用「手动关联」命令直接指定。";
+		}
+		const mine = this.store.getFingerprint(path);
+		if (!mine) {
+			return "当前 PDF 还没采集到指纹(等文字层渲染完再试一次)。";
+		}
+		const unopened = candidates.filter((c) => !this.store.getFingerprint(c));
+		if (unopened.length > 0) {
+			return `找到候选:${unopened[0].split("/").pop()}\n但它还没被打开过——打开一次就会自动关联。`;
+		}
+		for (const c of candidates) {
+			const other = this.store.getFingerprint(c)!;
+			if (!sameGeometry(mine, other)) {
+				return `候选 ${c.split("/").pop()} 的页数/尺寸和当前文件不一致(${mine.pages}页 ${mine.width}×${mine.height} vs ${other.pages}页 ${other.width}×${other.height}),排版对不上,不能共用坐标。`;
+			}
+			if (!differentLanguage(mine, other)) {
+				return `候选 ${c.split("/").pop()} 看起来和当前文件是同一种语言(中文占比 ${mine.cjk.toFixed(2)} vs ${other.cjk.toFixed(2)}),不像原文/译文。\n确实要共用批注的话用「手动关联」命令。`;
+			}
+		}
+		return "找到候选但未通过校验,可用「手动关联」命令强制指定。";
+	}
+
+	/** Pairs the active PDF with an explicitly chosen file, skipping every check —
+	 * the escape hatch for when auto-detection is wrong or too conservative. */
+	pairManually(otherPath: string): void {
+		const file = this.currentPdfTarget();
+		if (!file) return;
+		const mine = this.store.getFingerprint(file.path);
+		const other = this.store.getFingerprint(otherPath);
+		// Prefer the source language as the bucket name when we can tell.
+		const canonical = mine && other ? canonicalOf(file.path, mine, otherPath, other) : otherPath;
+		this.store.pair(file.path, otherPath, canonical);
+		new Notice(`已手动关联,批注共用:\n${otherPath.split("/").pop()}`);
+	}
+
+	/** Name-similar PDFs, for the manual pairing picker. */
+	pairingCandidates(): string[] {
+		const file = this.currentPdfTarget();
+		if (!file) return [];
+		const named = findNameCandidates(this.app, file.path);
+		if (named.length > 0) return named;
+		// Nothing name-similar: offer every other PDF rather than a dead end.
+		return this.app.vault
+			.getFiles()
+			.filter((f) => f.extension === "pdf" && f.path !== file.path)
+			.map((f) => f.path);
+	}
+
+	unpairActive(): void {
+		const file = this.currentPdfTarget();
+		if (!file) return;
+		if (!this.store.isPaired(file.path)) {
+			new Notice("当前 PDF 没有关联");
+			return;
+		}
+		this.store.unpair(file.path);
+		new Notice("已解除关联(批注留在原文那一侧)");
+	}
+
 	/**
 	 * Flips to the paired translation/original, landing on the same page and the
 	 * same fraction down that page — the layouts match closely enough (measured
@@ -216,9 +281,17 @@ export class PdfAnnotationsController {
 		const file = this.currentPdfTarget();
 		if (!view || !file) return;
 
-		const other = this.store.counterpartOf(file.path);
+		let other = this.store.counterpartOf(file.path);
 		if (!other) {
-			new Notice("没有找到关联的原文/译文——两份都打开过一次之后才能自动识别");
+			// Retry the match now (the other side may have been opened since), and
+			// if it still won't pair, say exactly which check failed — "not found"
+			// gave no way to tell a naming problem from a never-opened counterpart.
+			const fp = this.store.getFingerprint(file.path);
+			if (fp) this.tryAutoPair(file.path, fp);
+			other = this.store.counterpartOf(file.path);
+		}
+		if (!other) {
+			new Notice(this.explainNoCounterpart(file.path), 8000);
 			return;
 		}
 
@@ -389,16 +462,22 @@ export class PdfAnnotationsController {
 			if (!path) return;
 			layer.rebuild(path, pages);
 
-			// The text layer is also the free sample of what script this document
-			// is written in — all counterpart detection needs, no extra parsing.
+			// The text layer is also a free sample of what script this document is
+			// written in — all counterpart detection needs, no extra parsing.
+			// Read the rendered spans rather than `textContentItems`: that field is
+			// declared in the mirrored pdf.js types but nothing else ever exercises
+			// it, so its presence across Obsidian versions is unverified, whereas
+			// getTextLayerInfo() has already established that textDivs exists.
 			if (!state.sampler.done) {
 				const info = getTextLayerInfo(pageView);
-				if (info) {
+				if (info?.textDivs) {
 					state.sampler.add(
 						pageNumber,
-						info.textContentItems.map((i) => i.str)
+						info.textDivs.map((d) => d.textContent ?? "")
 					);
-					if (state.sampler.done) this.captureFingerprint(view, path, state);
+					// Write on every sampled page, not only once the sample is
+					// "complete" — see ScriptSampler.done.
+					this.captureFingerprint(view, path, state);
 				}
 			}
 		});

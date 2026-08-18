@@ -4,6 +4,7 @@ import { scanFootnotes } from "./footnote-scan";
 import { ANNOTATION_LIST_VIEW, AnnotationListView } from "./pdf/annotation-list-view";
 import { PdfAnnotationSettingTab } from "./pdf/annotation-settings-tab";
 import { PdfAnnotationsController, type NewNoteForm } from "./pdf/controller";
+import { PairPickerModal } from "./pdf/pair-picker";
 
 export default class MarginNotesPlugin extends Plugin {
 	private pdfAnnotations!: PdfAnnotationsController;
@@ -34,6 +35,28 @@ export default class MarginNotesPlugin extends Plugin {
 			checkCallback: (checking) => {
 				const active = this.pdfAnnotations.hasActivePDFView();
 				if (!checking && active) void this.pdfAnnotations.switchToCounterpart();
+				return active;
+			},
+		});
+
+		this.addCommand({
+			id: "pdf-pair-counterpart",
+			name: "[PDF] 手动关联原文/译文(共用批注)",
+			checkCallback: (checking) => {
+				const active = this.pdfAnnotations.hasActivePDFView();
+				if (!checking && active) {
+					const candidates = this.pdfAnnotations.pairingCandidates();
+					new PairPickerModal(this.app, candidates, (p) => this.pdfAnnotations.pairManually(p)).open();
+				}
+				return active;
+			},
+		});
+		this.addCommand({
+			id: "pdf-unpair-counterpart",
+			name: "[PDF] 解除原文/译文关联",
+			checkCallback: (checking) => {
+				const active = this.pdfAnnotations.hasActivePDFView();
+				if (!checking && active) this.pdfAnnotations.unpairActive();
 				return active;
 			},
 		});

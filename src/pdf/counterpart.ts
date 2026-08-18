@@ -22,8 +22,19 @@ export interface PdfFingerprint {
 	cjk: number;
 }
 
-/** A translated copy is CJK-dominant; the source is not. */
-const CJK_DOMINANT = 0.25;
+/**
+ * Language test, expressed as a GAP between the two sides rather than an
+ * absolute threshold — because the number measured from a live pdf.js text
+ * layer is not trustworthy in absolute terms. Observed in this vault: a paper
+ * that PyMuPDF reports as 0.000 CJK measured 0.20 through the text layer
+ * (LaTeX math fonts with broken ToUnicode maps emit glyphs that land in the
+ * CJK block). An absolute 0.25 cutoff was therefore nearly tripping on pure
+ * English. A real translation sits around 0.9, so requiring a wide separation
+ * survives that noise while still rejecting two copies of the same-language
+ * document, which score near-identically whatever the absolute value is.
+ */
+const CJK_MIN_GAP = 0.4;
+const CJK_TRANSLATED_MIN = 0.5;
 /** Below this the two names are too short/too dissimilar to trust. */
 const MIN_CORE_LEN = 12;
 const MIN_NAME_RATIO = 0.6;
@@ -54,9 +65,15 @@ export function namesLookRelated(a: string, b: string): boolean {
  * side written in CJK (so it's a translation, not a duplicate or a variant).
  */
 export function fingerprintsPair(a: PdfFingerprint, b: PdfFingerprint): boolean {
-	const sameGeometry = a.pages === b.pages && a.width === b.width && a.height === b.height;
-	const oneIsTranslated = a.cjk >= CJK_DOMINANT !== (b.cjk >= CJK_DOMINANT);
-	return sameGeometry && oneIsTranslated;
+	return sameGeometry(a, b) && differentLanguage(a, b);
+}
+
+export function sameGeometry(a: PdfFingerprint, b: PdfFingerprint): boolean {
+	return a.pages === b.pages && a.width === b.width && a.height === b.height;
+}
+
+export function differentLanguage(a: PdfFingerprint, b: PdfFingerprint): boolean {
+	return Math.abs(a.cjk - b.cjk) >= CJK_MIN_GAP && Math.max(a.cjk, b.cjk) >= CJK_TRANSLATED_MIN;
 }
 
 /** Vault PDFs whose name looks related to `path` (excluding itself). */
@@ -70,7 +87,7 @@ export function findNameCandidates(app: App, path: string): string[] {
 /** Of a confirmed pair, the source (non-CJK) side — used as the shared bucket key
  * so the group name stays meaningful no matter which side you annotate from. */
 export function canonicalOf(a: string, aFp: PdfFingerprint, b: string, bFp: PdfFingerprint): string {
-	return aFp.cjk >= CJK_DOMINANT ? b : a;
+	return aFp.cjk > bFp.cjk ? b : a;
 }
 
 /** Accumulates the CJK ratio across sampled pages of a live document. */
@@ -79,7 +96,13 @@ export class ScriptSampler {
 	private latin = 0;
 	private pagesSeen = new Set<number>();
 
-	/** Enough pages to be representative without waiting for a whole document. */
+	/**
+	 * More pages would be a better sample, but pdf.js only renders what's in the
+	 * viewport — waiting for three meant a document you opened and didn't scroll
+	 * was never fingerprinted at all, which is why nothing ever paired. The
+	 * fingerprint is therefore written from the first page and refined as more
+	 * arrive; `done` only stops the sampling, it doesn't gate the write.
+	 */
 	get done(): boolean {
 		return this.pagesSeen.size >= 3;
 	}

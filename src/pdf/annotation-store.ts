@@ -154,7 +154,12 @@ export class PdfAnnotationStore {
 	setFingerprint(pdfPath: string, fp: PdfFingerprint): void {
 		const p = normalizePath(pdfPath);
 		const prev = this.fingerprints[p];
-		if (prev && prev.pages === fp.pages && prev.width === fp.width && prev.height === fp.height) return;
+		// Compare every field, `cjk` included: it is refined as further pages are
+		// sampled, and skipping the write on unchanged geometry alone would pin
+		// the ratio to whatever the first page happened to show.
+		if (prev && prev.pages === fp.pages && prev.width === fp.width && prev.height === fp.height && prev.cjk === fp.cjk) {
+			return;
+		}
 		this.fingerprints[p] = fp;
 		this.save();
 	}
