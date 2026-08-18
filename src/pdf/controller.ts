@@ -1,4 +1,4 @@
-import { Component, FileView, Notice, TFile, type App, type Plugin } from "obsidian";
+import { Component, FileView, Menu, Notice, TFile, type App, type Plugin } from "obsidian";
 import { patchPluginData } from "../plugin-data";
 import { anchorFromActiveSelection } from "./annotation-anchor";
 import { AnnotationLayer } from "./annotation-layer";
@@ -6,7 +6,9 @@ import {
 	applyPdfAnnotationStyleSettings,
 	clearPdfAnnotationStyleSettings,
 	DEFAULT_PDF_ANNOTATION_SETTINGS,
+	HIGHLIGHT_MODE_LABELS,
 	loadPdfAnnotationSettings,
+	type HighlightMode,
 	type PdfAnnotationSettings,
 } from "./annotation-settings";
 import { PdfAnnotationStore } from "./annotation-store";
@@ -128,6 +130,23 @@ export class PdfAnnotationsController {
 	/** Partial update used by in-canvas affordances (e.g. dragging the rail wider). */
 	patchSettings(patch: Partial<PdfAnnotationSettings>): void {
 		void this.saveSettings({ ...this.settings, ...patch });
+	}
+
+	/** Menu-driven so the four modes are readable side by side and the current
+	 * one is visibly checked — a plain "cycle" command makes you step through
+	 * every mode to find out which you are on. */
+	chooseHighlightMode(): void {
+		const menu = new Menu();
+		for (const [value, label] of Object.entries(HIGHLIGHT_MODE_LABELS) as [HighlightMode, string][]) {
+			menu.addItem((i) =>
+				i
+					.setTitle(label)
+					.setChecked(this.settings.highlightMode === value)
+					.onClick(() => this.patchSettings({ highlightMode: value }))
+			);
+		}
+		const rect = (this.targetPdfView()?.containerEl ?? document.body).getBoundingClientRect();
+		menu.showAtPosition({ x: rect.left + rect.width / 2, y: rect.top + 80 });
 	}
 
 	/**

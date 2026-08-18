@@ -109,6 +109,9 @@ export class AnnotationLayer {
 	private gen = 0;
 	private last: { pdfPath: string; pages: Map<number, PDFPageView> } | null = null;
 	private rebuildTimer = 0;
+	/** Anchor rects in scroll coords, for `both` mode's reverse hover test. */
+	private hitAreas: { ann: PdfAnnotation; el: HTMLElement; x0: number; x1: number; y0: number; y1: number }[] = [];
+	private hoveredAnchorId: string | null = null;
 
 	constructor(
 		private app: App,
@@ -134,10 +137,12 @@ export class AnnotationLayer {
 		// nothing gives the PDF viewer's scroller that for free.
 		if (getComputedStyle(scroller).position === "static") scroller.style.position = "relative";
 
+		this.scroller?.removeEventListener("mousemove", this.onScrollerMove);
 		const layer = scroller.createDiv(LAYER_CLASS);
 		layer.setCssStyles({ position: "absolute", top: "0", left: "0", pointerEvents: "none" });
 		this.layer = layer;
 		this.scroller = scroller;
+		scroller.addEventListener("mousemove", this.onScrollerMove);
 		return layer;
 	}
 
@@ -201,6 +206,8 @@ export class AnnotationLayer {
 		const layer = this.ensureLayer(anyPage.div);
 		layer.empty();
 		this.hoverMark = null;
+		this.hitAreas = [];
+		this.hoveredAnchorId = null;
 
 		const built: Placed[] = [];
 		const pending: Promise<void>[] = [];
@@ -341,6 +348,11 @@ export class AnnotationLayer {
 		// post-transform getBoundingClientRect cannot disagree with what is on
 		// screen, so the reachable area is defined by the genuinely outermost
 		// note — whichever kind it happens to be — rather than by the rail.
+		// After positioning: leader lines need the notes' final boxes, and the
+		// `always` bands must not be counted in the width above (they sit over the
+		// page, never past it).
+		this.renderModeDecorations(built, settings, scroller);
+
 		const right = Math.max(maxRight, this.measuredRight(built, scroller));
 		this.layer!.style.width = right > 0 ? `${right + OUTER_MARGIN_PX}px` : "";
 	}
@@ -572,12 +584,34 @@ export class AnnotationLayer {
 			sourcePath: pdfPath,
 			initialText: ann.text,
 			onCommit: (text) => this.mutate(pdfPath, ann, (a) => (a.text = text)),
-			// A single "⋯" trigger, not one icon per action — six buttons crammed into
-			// the top-right corner covered short notes' text entirely.
+			// The body now starts below the toolbar's row rather than beside it, so
+			// icons no longer cost text width and the most-used few can live here
+			// again instead of behind the "⋯". Everything is still in the menu too.
 			actions: [
 				{
+					icon: "a-arrow-down",
+					title: "字号调小",
+					onClick: () => this.scaleFont(pdfPath, ann, -0.15),
+				},
+				{
+					icon: "a-arrow-up",
+					title: "字号调大",
+					onClick: () => this.scaleFont(pdfPath, ann, 0.15),
+				},
+				{
+					icon: "circle",
+					cls: "margin-notes-pdf-swatch",
+					title: "更改颜色",
+					onClick: () => this.pickColor(pdfPath, ann, this.colorOf(ann)),
+				},
+				{
+					icon: "square",
+					title: "切换有无边框",
+					onClick: () => this.mutate(pdfPath, ann, (a) => (a.style = a.style === "plain" ? "boxed" : "plain")),
+				},
+				{
 					icon: "more-horizontal",
-					title: "批注菜单(字号、颜色、固定/收起…)",
+					title: "更多(固定/收起、移动、重设高亮、删除…)",
 					onClick: (ev) => this.openMenu(pdfPath, ann, { x: ev.clientX, y: ev.clientY }),
 				},
 			],
@@ -588,6 +622,9 @@ export class AnnotationLayer {
 		handle.el.dataset.side = ann.side;
 		handle.el.dataset.style = ann.style ?? "boxed";
 		if (ann.color) handle.el.style.setProperty("--margin-notes-pdf-note-color", ann.color);
+		handle.el
+			.querySelector<HTMLElement>(".margin-notes-pdf-swatch")
+			?.style.setProperty("color", this.colorOf(ann));
 
 		handle.el.addEventListener("contextmenu", (e) => this.showMenu(e, pdfPath, ann));
 		handle.el.addEventListener("mouseenter", () => this.beginHoverHighlight(pageView, ann));
@@ -1025,6 +1062,17 @@ export class AnnotationLayer {
 		this.hoverMark = null;
 	}
 
+	/**
+	 * The colour a note and its highlight share. Per-note `color` wins; otherwise
+	 * the rail/free default for its kind — so the band over the text is always
+	 * the same hue as the note it belongs to, which is what makes several
+	 * highlights on one page readable at a glance.
+	 */
+	private colorOf(ann: PdfAnnotation): string {
+		const s = this.getSettings();
+		return ann.color ?? (ann.pinned ? s.railColor : s.freeColor);
+	}
+
 	private drawAnchorMark(pageView: PDFPageView, ann: PdfAnnotation, cls: string): HTMLElement | null {
 		const layer = this.layer;
 		const scroller = this.scroller;
@@ -1049,6 +1097,7 @@ export class AnnotationLayer {
 		const bottomPt = box.ptY1 - Math.min(rect[1], rect[3]);
 
 		const mark = layer.createDiv(cls);
+		mark.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
 		mark.setCssStyles({
 			left: `${box.left + ((left - box.ptX0) / box.ptWidth) * box.width}px`,
 			top: `${box.top + (topPt / box.ptHeight) * box.height}px`,
@@ -1058,12 +1107,125 @@ export class AnnotationLayer {
 		return mark;
 	}
 
+	/**
+	 * Draws whatever the current mode wants shown without any pointer involved:
+	 * a permanent band per anchor (`always`), or a leader line from each note to
+	 * its text (`line`). `note`/`both` draw nothing here — they are purely
+	 * hover-driven — but `both` still needs the anchor rects recorded, which is
+	 * what `hitAreas` is for.
+	 */
+	private renderModeDecorations(built: Placed[], settings: PdfAnnotationSettings, scroller: HTMLElement): void {
+		this.hitAreas = [];
+		const layer = this.layer;
+		if (!layer) return;
+		const mode = settings.highlightMode;
+		const scrollerRect = scroller.getBoundingClientRect();
+
+		for (const item of built) {
+			const { ann, el, pageView, rect } = item;
+			if (!pageView.div.isConnected || !pageView.pdfPage?.view) continue;
+			if (isUnresolvedAnchor(rect)) continue;
+
+			const box = this.pageBox(pageView, scroller, scrollerRect);
+			const x0 = box.left + ((Math.min(rect[0], rect[2]) - box.ptX0) / box.ptWidth) * box.width;
+			const x1 = box.left + ((Math.max(rect[0], rect[2]) - box.ptX0) / box.ptWidth) * box.width;
+			const y0 = box.top + ((box.ptY1 - Math.max(rect[1], rect[3])) / box.ptHeight) * box.height;
+			const y1 = box.top + ((box.ptY1 - Math.min(rect[1], rect[3])) / box.ptHeight) * box.height;
+
+			if (mode === "both") this.hitAreas.push({ ann, el, x0, x1, y0, y1 });
+
+			if (mode === "always") {
+				const band = layer.createDiv("margin-notes-pdf-anchor-band");
+				band.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
+				band.setCssStyles({ left: `${x0}px`, top: `${y0}px`, width: `${x1 - x0}px`, height: `${y1 - y0}px` });
+			} else if (mode === "line") {
+				this.drawLeader(layer, ann, el, { x0, x1, y0, y1 });
+			}
+		}
+	}
+
+	/**
+	 * A thin leader from the note's page-facing edge to the middle of its text.
+	 * Drawn as one rotated 1px div rather than an SVG overlay — it needs no
+	 * separate coordinate system, and there is exactly one primitive to keep in
+	 * sync with the layer's scroll coordinates.
+	 */
+	private drawLeader(
+		layer: HTMLElement,
+		ann: PdfAnnotation,
+		el: HTMLElement,
+		a: { x0: number; x1: number; y0: number; y1: number }
+	): void {
+		const noteLeft = parseFloat(el.style.left || "0");
+		const noteWidth = el.getBoundingClientRect().width;
+		const noteTop = parseFloat(el.style.top || "0");
+		const noteHeight = el.getBoundingClientRect().height;
+
+		// Start from whichever side of the note faces the text.
+		const noteCentre = noteLeft + noteWidth / 2;
+		const textCentre = (a.x0 + a.x1) / 2;
+		const sx = noteCentre > textCentre ? noteLeft : noteLeft + noteWidth;
+		const sy = noteTop + noteHeight / 2;
+		const tx = noteCentre > textCentre ? a.x1 : a.x0;
+		const ty = (a.y0 + a.y1) / 2;
+
+		const dx = tx - sx;
+		const dy = ty - sy;
+		const len = Math.hypot(dx, dy);
+		if (len < 1) return;
+
+		const line = layer.createDiv("margin-notes-pdf-leader");
+		line.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
+		line.setCssStyles({
+			left: `${sx}px`,
+			top: `${sy}px`,
+			width: `${len}px`,
+			transform: `rotate(${Math.atan2(dy, dx)}rad)`,
+			transformOrigin: "0 50%",
+		});
+	}
+
+	/**
+	 * Reverse hover for `both` mode: pointing at the TEXT lights up its note.
+	 *
+	 * Driven by a mousemove hit-test rather than by real elements over the
+	 * anchors, because anything with `pointer-events: auto` sitting on the page
+	 * would swallow text selection — and selecting text is how annotations get
+	 * made in the first place.
+	 */
+	private onScrollerMove = (ev: MouseEvent): void => {
+		if (this.hitAreas.length === 0 || !this.scroller) return;
+		// While the pointer is on a note, that note's own mouseenter owns the
+		// highlight. Without this the two fight: the note lights its anchor, then
+		// the very next mousemove finds no anchor under the cursor and clears it.
+		if ((ev.target as HTMLElement | null)?.closest(".margin-notes-pdf-note")) return;
+		const r = this.scroller.getBoundingClientRect();
+		const x = ev.clientX - r.left + this.scroller.scrollLeft;
+		const y = ev.clientY - r.top + this.scroller.scrollTop;
+
+		const hit = this.hitAreas.find((h) => x >= h.x0 && x <= h.x1 && y >= h.y0 && y <= h.y1);
+		if (hit?.ann.id === this.hoveredAnchorId) return;
+		this.hoveredAnchorId = hit?.ann.id ?? null;
+
+		for (const h of this.hitAreas) h.el.removeClass("is-linked");
+		this.endHoverHighlight();
+		if (!hit) return;
+
+		hit.el.addClass("is-linked");
+		const pageView = this.last?.pages.get(hit.ann.page);
+		if (pageView) this.beginHoverHighlight(pageView, hit.ann);
+	};
+
 	destroy(): void {
 		window.clearTimeout(this.rebuildTimer);
 		this.hoverMark = null;
 		// The gutter lives on pdf.js's own element, not ours — it has to be undone
 		// explicitly, unlike the layer, which disappears with its own node.
-		if (this.scroller) this.applyLeftGutter(this.scroller, 0);
+		if (this.scroller) {
+			this.applyLeftGutter(this.scroller, 0);
+			this.scroller.removeEventListener("mousemove", this.onScrollerMove);
+		}
+		this.hitAreas = [];
 		this.layer?.remove();
 		this.layer = null;
 		this.scroller = null;

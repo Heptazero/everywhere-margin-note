@@ -1,5 +1,10 @@
 import { App, PluginSettingTab, Setting, type Plugin } from "obsidian";
-import { DEFAULT_PDF_ANNOTATION_SETTINGS, type PdfAnnotationSettings } from "./annotation-settings";
+import {
+	DEFAULT_PDF_ANNOTATION_SETTINGS,
+	HIGHLIGHT_MODE_LABELS,
+	type HighlightMode,
+	type PdfAnnotationSettings,
+} from "./annotation-settings";
 import { resolveDataFilePath } from "./annotation-store";
 import type { PdfAnnotationsController } from "./controller";
 
@@ -136,6 +141,40 @@ export class PdfAnnotationSettingTab extends PluginSettingTab {
 					.setDynamicTooltip()
 					.onChange((v) => {
 						settings.opacity = v;
+						commit();
+					})
+			);
+
+		new Setting(containerEl).setName("高亮").setHeading();
+
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text:
+				"高亮指的是批注在原文上对应的那一段文字/区域。高亮的颜色跟随批注自己的颜色," +
+				"所以同一页上有多条批注时,一眼就能看出哪条对应哪段。",
+		});
+
+		new Setting(containerEl)
+			.setName("显示方式")
+			.setDesc("也可以用命令面板里的「切换高亮显示方式」随时改。")
+			.addDropdown((d) => {
+				for (const [value, label] of Object.entries(HIGHLIGHT_MODE_LABELS)) d.addOption(value, label);
+				d.setValue(settings.highlightMode).onChange((v) => {
+					settings.highlightMode = v as HighlightMode;
+					commit();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("高亮不透明度(%)")
+			.setDesc("只影响原文上的色块和指示线,不影响批注本身的不透明度。")
+			.addSlider((s) =>
+				s
+					.setLimits(5, 100, 1)
+					.setValue(settings.highlightOpacity)
+					.setDynamicTooltip()
+					.onChange((v) => {
+						settings.highlightOpacity = v;
 						commit();
 					})
 			);

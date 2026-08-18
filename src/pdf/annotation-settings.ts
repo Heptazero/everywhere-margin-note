@@ -38,7 +38,26 @@ export interface PdfAnnotationSettings {
 	railGapRight: number;
 	/** Base font size in px at 100% zoom. Every note scales this with the page's zoom. */
 	fontSize: number;
+	/** How the link between a note and the text it refers to is shown. */
+	highlightMode: HighlightMode;
+	/** 0-100, applied to the highlight band only (notes have their own `opacity`). */
+	highlightOpacity: number;
 }
+
+/**
+ * - `note`   only while the pointer is on the note (the original behaviour)
+ * - `both`   also the reverse: pointing at the text lights up its note
+ * - `always` every anchor is highlighted all the time
+ * - `line`   a thin leader line from each note to its text, no band
+ */
+export type HighlightMode = "note" | "both" | "always" | "line";
+
+export const HIGHLIGHT_MODE_LABELS: Record<HighlightMode, string> = {
+	note: "只有悬浮批注时高亮原文",
+	both: "双向:悬浮批注或悬浮原文都高亮",
+	always: "一直显示所有高亮",
+	line: "用细线指向原文(不涂色块)",
+};
 
 export const DEFAULT_PDF_ANNOTATION_SETTINGS: PdfAnnotationSettings = {
 	dataPath: ".margin-notes-hz",
@@ -50,6 +69,8 @@ export const DEFAULT_PDF_ANNOTATION_SETTINGS: PdfAnnotationSettings = {
 	railGapLeft: 10,
 	railGapRight: 10,
 	fontSize: 12,
+	highlightMode: "note",
+	highlightOpacity: 30,
 };
 
 interface StoredShape {
@@ -96,6 +117,7 @@ export function applyPdfAnnotationStyleSettings(settings: PdfAnnotationSettings)
 	body.style.setProperty("--margin-notes-pdf-free-color", settings.freeColor);
 	body.style.setProperty("--margin-notes-pdf-rail-color", settings.railColor);
 	body.style.setProperty("--margin-notes-pdf-opacity", String(settings.opacity / 100));
+	body.style.setProperty("--margin-notes-pdf-highlight-opacity", String(settings.highlightOpacity / 100));
 }
 
 export function clearPdfAnnotationStyleSettings(): void {
@@ -103,4 +125,5 @@ export function clearPdfAnnotationStyleSettings(): void {
 	body.style.removeProperty("--margin-notes-pdf-free-color");
 	body.style.removeProperty("--margin-notes-pdf-rail-color");
 	body.style.removeProperty("--margin-notes-pdf-opacity");
+	body.style.removeProperty("--margin-notes-pdf-highlight-opacity");
 }

@@ -30,6 +30,12 @@ export default class MarginNotesPlugin extends Plugin {
 		this.addPdfNoteCommand("pdf-add-note-free", "[PDF] 加批注:自由摆放(便利贴)", { pinned: false, side: "right", collapsed: false });
 
 		this.addCommand({
+			id: "pdf-highlight-mode",
+			name: "[PDF] 切换高亮显示方式",
+			callback: () => this.pdfAnnotations.chooseHighlightMode(),
+		});
+
+		this.addCommand({
 			id: "pdf-switch-counterpart",
 			name: "[PDF] 切换到对应的译文/原文(保持页码和位置)",
 			checkCallback: (checking) => {

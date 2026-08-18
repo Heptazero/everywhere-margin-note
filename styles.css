@@ -516,3 +516,50 @@
 	transition: opacity 0.18s ease;
 	opacity: 0.15;
 }
+
+/* ---- Highlight modes (settings.highlightMode) ---- */
+
+/* `always`: a permanent band over every anchored region. Deliberately a
+   separate class from the hover/flash marks — it must not animate or clear
+   itself, and it sits UNDER the notes so a note dragged over the page stays
+   readable. Colour comes from the note it belongs to (annotation-layer.ts's
+   colorOf), so several highlights on one page stay tellable apart. */
+.margin-notes-pdf-anchor-band {
+	position: absolute;
+	pointer-events: none;
+	border-radius: 2px;
+	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
+	opacity: var(--margin-notes-pdf-highlight-opacity, 0.3);
+}
+
+/* `line`: a hairline leader from the note to its text, rotated into place by
+   annotation-layer.ts. Height is 1px and never scales — a leader is an
+   annotation ON the view, not part of the page, and a hairline reads correctly
+   at every zoom. */
+.margin-notes-pdf-leader {
+	position: absolute;
+	height: 1px;
+	pointer-events: none;
+	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
+	opacity: var(--margin-notes-pdf-highlight-opacity, 0.3);
+}
+
+/* `both`: the note lit up because the pointer is over its TEXT (the reverse of
+   the usual direction), so it needs to be visible without being hovered. */
+.margin-notes-pdf-note.is-linked {
+	opacity: 1;
+	z-index: 2;
+	box-shadow: 0 0 0 2px var(--margin-notes-pdf-note-color, var(--interactive-accent));
+}
+
+/* The toolbar's colour button shows the note's actual colour rather than the
+   muted default, so it doubles as a swatch. */
+.margin-notes-pdf-action.margin-notes-pdf-swatch .svg-icon {
+	fill: currentColor;
+}
+
+/* The hover band uses the note's colour too, and the configured opacity. */
+.margin-notes-pdf-anchor-hover {
+	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
+	opacity: var(--margin-notes-pdf-highlight-opacity, 0.3);
+}
