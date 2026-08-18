@@ -32,7 +32,8 @@ function resolveBoundary(container: Node, offset: number): { node: Text; offset:
 	return { node: textNode, offset: offset === 0 ? 0 : textNode.length };
 }
 
-function unionRect(rects: PdfRect[]): PdfRect | null {
+/** Also used by quote-anchor.ts to collapse a multi-line text match into one box. */
+export function unionRect(rects: PdfRect[]): PdfRect | null {
 	if (rects.length === 0) return null;
 	let [x0, y0, x1, y1] = rects[0];
 	for (const r of rects.slice(1)) {

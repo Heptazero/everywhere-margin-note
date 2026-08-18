@@ -4,8 +4,15 @@ import { buildAnnotationBox, type AnnotationBoxHandle } from "./annotation-box";
 import type { PdfAnnotationSettings } from "./annotation-settings";
 import type { PdfAnnotationStore } from "./annotation-store";
 import { DEFAULT_FREE_WIDTH_PCT, type MarginSide, type PdfAnnotation } from "./annotation-types";
+import type { PdfRect } from "./pdf-layer";
 import type { PDFPageView } from "./pdfjs-types";
+import { resolveQuoteAnchor } from "./quote-anchor";
 import { findScrollAncestor } from "./scroll-container";
+
+/** `[0,0,0,0]` marks a record whose anchor still needs to be looked up from `quote`. */
+function isUnresolvedAnchor(anchor: PdfRect): boolean {
+	return anchor[0] === 0 && anchor[1] === 0 && anchor[2] === 0 && anchor[3] === 0;
+}
 
 const LAYER_CLASS = "margin-notes-pdf-layer";
 const MIN_GAP = 8;
@@ -168,6 +175,7 @@ export class AnnotationLayer {
 		for (const [pageNumber, pageView] of pages) {
 			if (!pageView.pdfPage?.view || !pageView.div.isConnected) continue;
 			for (const ann of this.store.forPage(pdfPath, pageNumber)) {
+				this.resolveAnchorIfNeeded(pdfPath, ann, pageView);
 				if (ann.collapsed) {
 					built.push({ ann, pageView, el: this.createDot(layer, pdfPath, ann) });
 					continue;
@@ -331,6 +339,43 @@ export class AnnotationLayer {
 		});
 		dot.addEventListener("contextmenu", (e) => this.showMenu(e, pdfPath, ann));
 		return dot;
+	}
+
+	/**
+	 * A record with no real `anchor` (an AI-authored one, typically — see
+	 * quote-anchor.ts) gets resolved here, the first time its page is on
+	 * screen: search the text layer for `quote`, write the real rect back so
+	 * every later render is instant and ordinary.
+	 *
+	 * A failed match (page's text layer not ready yet, or the quote genuinely
+	 * isn't found — a paraphrase rather than a verbatim copy, say) falls back to
+	 * a fixed spot near the top of the page instead of being invisible. That
+	 * fallback is NOT written to disk, but it does overwrite `ann.anchor` on the
+	 * live object the store holds — since `isUnresolvedAnchor` is what this
+	 * function gates on, that means a fallback used once stops future retries
+	 * for the rest of the session. In practice this is fine for the case that
+	 * matters (a quote that truly doesn't match will never resolve however many
+	 * times it's retried) and only a narrow race for "text layer wasn't ready
+	 * yet" (self-resolves within the ~60ms rebuild debounce almost always) — but
+	 * it's a real edge, not a guarantee, and worth knowing if a note ever seems
+	 * stuck at the top of a page it shouldn't be on.
+	 */
+	private resolveAnchorIfNeeded(pdfPath: string, ann: PdfAnnotation, pageView: PDFPageView): void {
+		if (!isUnresolvedAnchor(ann.anchor)) return;
+
+		if (ann.quote) {
+			const resolved = resolveQuoteAnchor(pageView, ann.quote);
+			if (resolved) {
+				ann.anchor = resolved;
+				ann.updatedAt = Date.now();
+				this.store.upsert(pdfPath, ann);
+				return;
+			}
+		}
+		if (pageView.pdfPage?.view) {
+			const [x0, , , y1] = pageView.pdfPage.view;
+			ann.anchor = [x0 + 20, y1 - 60, x0 + 220, y1 - 20];
+		}
 	}
 
 	private mutate(pdfPath: string, ann: PdfAnnotation, fn: (a: PdfAnnotation) => void): void {

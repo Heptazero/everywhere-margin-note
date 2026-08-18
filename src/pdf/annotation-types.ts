@@ -18,8 +18,22 @@ export type MarginSide = "left" | "right";
 export interface PdfAnnotation {
 	id: string;
 	page: number;
-	/** Where the note points — from a text selection or dragged box, in PDF points. */
+	/**
+	 * Where the note points — from a text selection or dragged box, in PDF
+	 * points. `[0,0,0,0]` (the default when omitted) means "unresolved": if
+	 * `quote` is set, the renderer looks it up on `page`'s text layer and
+	 * writes the real rect back the first time that page is on screen; a note
+	 * with neither a real anchor nor a resolvable quote falls back to a fixed
+	 * spot near the top of the page rather than being invisible.
+	 */
 	anchor: PdfRect;
+	/**
+	 * Text to search for on `page` to resolve `anchor` when it's unresolved —
+	 * the field an AI (or anyone without a live PDF viewer) can actually supply,
+	 * since it has no way to produce point coordinates from extracted text.
+	 * See quote-anchor.ts.
+	 */
+	quote?: string;
 
 	/** In the side rail (true) or placed freely (false). */
 	pinned: boolean;
@@ -80,6 +94,7 @@ export function normalizeAnnotation(raw: LegacyAnnotation): PdfAnnotation {
 		offsetY: raw.offsetY,
 		fontScale: raw.fontScale,
 		color: raw.color,
+		quote: raw.quote,
 		style: raw.style,
 		text: raw.text ?? "",
 		createdAt: raw.createdAt ?? Date.now(),
