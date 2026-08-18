@@ -484,3 +484,16 @@
 	width: 12px;
 	height: 12px;
 }
+
+/* Bridges the moment switchToCounterpart() swaps the PDF file — pdf.js tears
+   down and re-renders the page canvases on a file swap, so this can't be a
+   real crossfade between the two documents' content; it's a brief dip that
+   softens the flash of the swap instead of a hard cut.
+   Applied to the whole view container rather than a guessed internal pdf.js
+   class name — this plugin has been burned before by assuming undocumented
+   DOM structure (see HANDOFF.md); the container element itself is the one
+   part of this that's actually part of the public View API. */
+.margin-notes-pdf-switching {
+	transition: opacity 0.18s ease;
+	opacity: 0.15;
+}

@@ -26,6 +26,11 @@ import type { PDFPageView } from "./pdfjs-types";
 import { attachRectSelectListener, type RectSelectController } from "./rect-select";
 import { findScrollAncestor } from "./scroll-container";
 
+/** How long to wait for the target page to render before correcting scroll
+ * position and fading back in — in the same ballpark as revealAnnotation's
+ * own 350ms wait, both guessing at pdf.js's render latency. */
+const SWITCH_SETTLE_MS = 380;
+
 /** How a newly created note should appear. */
 export interface NewNoteForm {
 	pinned: boolean;
@@ -275,6 +280,14 @@ export class PdfAnnotationsController {
 	 * same fraction down that page — the layouts match closely enough (measured
 	 * on this vault: 1pt median vertical drift, 93% of blocks within one line)
 	 * that this reads as switching language in place.
+	 *
+	 * "Smooth" here means two honest things, not a crossfade between the two
+	 * documents' actual content — pdf.js tears down and re-renders the page
+	 * canvases on a file swap, and there is no supported way to keep both
+	 * painted at once to cross-dissolve between them. What IS real:
+	 *   1. A brief opacity dip on the pane bridges the moment of the swap
+	 *      instead of a hard flash of blank/re-laid-out content.
+	 *   2. Landing on the matched position is an animated scroll, not a jump.
 	 */
 	async switchToCounterpart(): Promise<void> {
 		const view = this.targetPdfView();
@@ -299,10 +312,20 @@ export class PdfAnnotationsController {
 		const page = this.visiblePage(state) ?? 1;
 		const fraction = this.pageScrollFraction(state, page);
 
+		// Captured as a plain element reference, not kept live off `view` or
+		// `view.leaf`: Obsidian reuses the same leaf/containerEl DOM node across
+		// a same-type file swap, but the View *instance* isn't guaranteed to
+		// survive it, so anything read from `view` again after the swap could be
+		// stale. The element itself has no such lifecycle problem.
+		const container = view.containerEl;
+		container.addClass("margin-notes-pdf-switching");
+
 		await this.app.workspace.openLinkText(`${other}#page=${page}`, "", false);
-		if (fraction === null) return;
-		// Re-apply the within-page offset once the target page has rendered.
-		window.setTimeout(() => this.applyPageFraction(page, fraction), 400);
+
+		window.setTimeout(() => {
+			if (fraction !== null) this.applyPageFraction(page, fraction);
+			container.removeClass("margin-notes-pdf-switching");
+		}, SWITCH_SETTLE_MS);
 	}
 
 	/** Whichever page currently occupies most of the viewport. */
@@ -333,7 +356,11 @@ export class PdfAnnotationsController {
 		if (!pv?.div.isConnected) return;
 		const scroller = findScrollAncestor(pv.div);
 		const r = pv.div.getBoundingClientRect();
-		scroller.scrollTop += r.top + fraction * r.height - scroller.getBoundingClientRect().top;
+		const delta = r.top + fraction * r.height - scroller.getBoundingClientRect().top;
+		// An animated scroll rather than an instant jump — this is the "smooth"
+		// part of switchToCounterpart() that's actually achievable (see its docs
+		// for why a true crossfade between the two documents isn't).
+		scroller.scrollBy({ top: delta, behavior: "smooth" });
 	}
 
 	/**
