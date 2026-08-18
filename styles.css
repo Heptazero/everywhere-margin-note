@@ -154,8 +154,8 @@
 }
 /* Plain notes are meant to be minimal — don't permanently reserve toolbar
    space; the hover-revealed "⋯" can sit over the last couple of characters. */
-.margin-notes-pdf-note[data-style="plain"] .margin-notes-pdf-body {
-	padding-right: 4px;
+.margin-notes-pdf-note[data-style="plain"] .margin-notes-pdf-body::before {
+	width: 4px;
 }
 
 /* Toolbar sits INSIDE the top-right corner, hover-revealed, so it is never
@@ -276,16 +276,33 @@
 .margin-notes-pdf-body {
 	cursor: text;
 	outline: none;
-	padding-right: 34px; /* room for the (up to 2-icon) toolbar so line 1 doesn't run under it */
+}
+/* Room for the (up to 2-icon) toolbar so line 1 doesn't run under it — as a
+   float, NOT `padding-right`. Padding reserved the toolbar's width on EVERY
+   line of a note forever, which on a narrow box is most of the text column and
+   is the "why is there so much blank space on the right" the user hit. A float
+   indents only the lines the toolbar actually overlaps; everything below it
+   uses the full width. */
+.margin-notes-pdf-body::before {
+	content: "";
+	float: right;
+	width: 34px;
+	height: 1.1em;
 }
 .margin-notes-pdf-note.is-editing .margin-notes-pdf-body {
 	white-space: pre-wrap;
 	font-family: var(--font-monospace);
 }
+/* Same pseudo-element as the toolbar float spacer above, so it must undo the
+   float explicitly — otherwise an empty note's placeholder renders as a
+   34px-wide right-floated sliver instead of a line of text. */
 .margin-notes-pdf-body:empty::before {
 	content: attr(data-placeholder);
 	color: var(--text-faint);
 	font-style: italic;
+	float: none;
+	width: auto;
+	height: auto;
 }
 .margin-notes-pdf-body p {
 	margin: 0;
