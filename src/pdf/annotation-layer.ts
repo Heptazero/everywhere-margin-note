@@ -165,8 +165,8 @@ export class AnnotationLayer {
 
 		const layer = this.ensureLayer(anyPage.div);
 		layer.empty();
+		this.hoverMark = null;
 
-		const railWidthPt = Math.max(MIN_RAIL_WIDTH_PT, settings.railWidth);
 		const built: Placed[] = [];
 		const pending: Promise<void>[] = [];
 
@@ -180,7 +180,7 @@ export class AnnotationLayer {
 					built.push({ ann, pageView, el: this.createDot(layer, pdfPath, ann) });
 					continue;
 				}
-				const handle = this.createBox(layer, pdfPath, ann, pageView, railWidthPt);
+				const handle = this.createBox(layer, pdfPath, ann, pageView);
 				pending.push(handle.render());
 				built.push({ ann, pageView, el: handle.el });
 			}
@@ -188,7 +188,7 @@ export class AnnotationLayer {
 		if (built.length === 0) return;
 
 		// Position once with the geometry as it stands, so nothing flashes at 0,0…
-		this.layout(built, railWidthPt, settings);
+		this.layout(built, settings);
 
 		// …then again after Markdown/MathJax resolves. Two reasons: box heights
 		// aren't final until then (collision avoidance needs real heights), and
@@ -201,7 +201,17 @@ export class AnnotationLayer {
 		// the render wait — the second `layout()` call below would otherwise still
 		// go and reposition (fight) whatever they're mid-drag on.
 		if (gen !== this.gen || this.isBusy()) return;
-		this.layout(built, railWidthPt, settings);
+		this.layout(built, settings);
+	}
+
+	/** Rail width/gap in PDF points for one side — left and right are independent
+	 * settings (they used to be one shared value, which is why resizing the left
+	 * rail used to silently move the right one too). */
+	private railWidthPt(settings: PdfAnnotationSettings, side: MarginSide): number {
+		return Math.max(MIN_RAIL_WIDTH_PT, side === "right" ? settings.railWidthRight : settings.railWidthLeft);
+	}
+	private railGapPt(settings: PdfAnnotationSettings, side: MarginSide): number {
+		return side === "right" ? settings.railGapRight : settings.railGapLeft;
 	}
 
 	/**
@@ -213,7 +223,7 @@ export class AnnotationLayer {
 	 * therefore a page-point width, turned into px here via each note's own
 	 * `box.zoom`, exactly like `settings.fontSize` already was for free notes.
 	 */
-	private layout(built: Placed[], railWidthPt: number, settings: PdfAnnotationSettings): void {
+	private layout(built: Placed[], settings: PdfAnnotationSettings): void {
 		const scroller = this.scroller;
 		if (!scroller) return;
 
@@ -233,8 +243,8 @@ export class AnnotationLayer {
 			const fontPx = settings.fontSize * box.zoom * (ann.fontScale ?? 1);
 
 			if (ann.pinned) {
-				const railWidthPx = railWidthPt * box.zoom;
-				const left = this.railLeft(ann.side, box, railWidthPx, settings.railGap * box.zoom);
+				const railWidthPx = this.railWidthPt(settings, ann.side) * box.zoom;
+				const left = this.railLeft(ann.side, box, railWidthPx, this.railGapPt(settings, ann.side) * box.zoom);
 				el.style.left = `${left}px`;
 				if (!ann.collapsed) {
 					el.style.width = `${railWidthPx}px`;
@@ -385,13 +395,7 @@ export class AnnotationLayer {
 		this.refresh();
 	}
 
-	private createBox(
-		layer: HTMLElement,
-		pdfPath: string,
-		ann: PdfAnnotation,
-		pageView: PDFPageView,
-		railWidthPt: number
-	): AnnotationBoxHandle {
+	private createBox(layer: HTMLElement, pdfPath: string, ann: PdfAnnotation, pageView: PDFPageView): AnnotationBoxHandle {
 		const handle = buildAnnotationBox(layer, "margin-notes-pdf-note", {
 			app: this.app,
 			component: this.component,
@@ -416,8 +420,10 @@ export class AnnotationLayer {
 		if (ann.color) handle.el.style.setProperty("--margin-notes-pdf-note-color", ann.color);
 
 		handle.el.addEventListener("contextmenu", (e) => this.showMenu(e, pdfPath, ann));
+		handle.el.addEventListener("mouseenter", () => this.beginHoverHighlight(pageView, ann));
+		handle.el.addEventListener("mouseleave", () => this.endHoverHighlight());
 		this.attachDrag(handle, pdfPath, ann, pageView);
-		this.attachResize(handle, pdfPath, ann, pageView, railWidthPt);
+		this.attachResize(handle, pdfPath, ann, pageView);
 		return handle;
 	}
 
@@ -614,14 +620,8 @@ export class AnnotationLayer {
 	 * (÷ current zoom) before saving, so the rail keeps the size the user chose
 	 * as the PDF is zoomed afterwards.
 	 */
-	private attachResize(
-		handle: AnnotationBoxHandle,
-		pdfPath: string,
-		ann: PdfAnnotation,
-		pageView: PDFPageView,
-		railWidthPt: number
-	): void {
-		if (ann.pinned) this.attachRailResize(handle, ann, pageView, railWidthPt);
+	private attachResize(handle: AnnotationBoxHandle, pdfPath: string, ann: PdfAnnotation, pageView: PDFPageView): void {
+		if (ann.pinned) this.attachRailResize(handle, ann, pageView);
 		else this.attachFreeResize(handle, pdfPath, ann, pageView);
 	}
 
@@ -640,14 +640,11 @@ export class AnnotationLayer {
 	 * Both are shared settings, so dragging either on any one note re-flows
 	 * every note in that rail — which is the point of a rail.
 	 */
-	private attachRailResize(
-		handle: AnnotationBoxHandle,
-		ann: PdfAnnotation,
-		pageView: PDFPageView,
-		railWidthPt: number
-	): void {
+	private attachRailResize(handle: AnnotationBoxHandle, ann: PdfAnnotation, pageView: PDFPageView): void {
 		// Which DOM edge faces the page depends on the side the rail is on.
 		const innerEdge = ann.side === "right" ? "left" : "right";
+		const widthKey = ann.side === "right" ? "railWidthRight" : "railWidthLeft";
+		const gapKey = ann.side === "right" ? "railGapRight" : "railGapLeft";
 
 		const begin = (edge: "left" | "right") => (ev: PointerEvent) => {
 			ev.preventDefault();
@@ -657,7 +654,7 @@ export class AnnotationLayer {
 
 			const startX = ev.clientX;
 			const startW = handle.el.offsetWidth;
-			const startGapPx = this.getSettings().railGap * box.zoom;
+			const startGapPx = this.railGapPt(this.getSettings(), ann.side) * box.zoom;
 			const minWidthPx = MIN_RAIL_WIDTH_PT * box.zoom;
 			const isInner = edge === innerEdge;
 			// dx is measured rightwards; a left-hand rail mirrors every effect.
@@ -685,8 +682,9 @@ export class AnnotationLayer {
 				const { width, gap } = solve(u.clientX);
 				const widthPt = Math.round(width / box.zoom);
 				const gapPt = Math.round(gap / box.zoom);
-				if (widthPt !== Math.round(railWidthPt) || gapPt !== Math.round(this.getSettings().railGap)) {
-					this.saveSettings({ railWidth: widthPt, railGap: gapPt });
+				const settings = this.getSettings();
+				if (widthPt !== Math.round(settings[widthKey]) || gapPt !== Math.round(settings[gapKey])) {
+					this.saveSettings({ [widthKey]: widthPt, [gapKey]: gapPt });
 				} else {
 					this.refresh();
 				}
@@ -777,10 +775,39 @@ export class AnnotationLayer {
 			window.setTimeout(() => el.removeClass("is-flashing"), 1200);
 		}
 
+		const pageView = pages.get(ann.page);
+		if (!pageView) return;
+		const mark = this.drawAnchorMark(pageView, ann, "margin-notes-pdf-anchor-flash");
+		if (!mark) return;
+		mark.scrollIntoView({ block: "center", behavior: "smooth" });
+		window.setTimeout(() => mark.remove(), 1600);
+	}
+
+	/**
+	 * Hover feedback: unlike `reveal()` (a click, timed flash + scroll), this
+	 * stays on screen for exactly as long as the pointer is over the note/row
+	 * and never scrolls anything — a rail note or a list-panel row can be far
+	 * from its source text, and jumping the view on mere hover would be far more
+	 * disorienting than the "where does this even point at" problem it's meant
+	 * to solve. Silently does nothing if the anchor's page isn't currently
+	 * rendered (e.g. hovering a list row for a page that's scrolled out of view).
+	 */
+	private hoverMark: HTMLElement | null = null;
+
+	beginHoverHighlight(pageView: PDFPageView, ann: PdfAnnotation): void {
+		this.endHoverHighlight();
+		this.hoverMark = this.drawAnchorMark(pageView, ann, "margin-notes-pdf-anchor-hover");
+	}
+
+	endHoverHighlight(): void {
+		this.hoverMark?.remove();
+		this.hoverMark = null;
+	}
+
+	private drawAnchorMark(pageView: PDFPageView, ann: PdfAnnotation, cls: string): HTMLElement | null {
 		const layer = this.layer;
 		const scroller = this.scroller;
-		const pageView = pages.get(ann.page);
-		if (!layer || !scroller || !pageView?.div.isConnected || !pageView.pdfPage?.view) return;
+		if (!layer || !scroller || !pageView.div.isConnected || !pageView.pdfPage?.view) return null;
 
 		const box = this.pageBox(pageView, scroller, scroller.getBoundingClientRect());
 		const left = Math.min(ann.anchor[0], ann.anchor[2]);
@@ -788,19 +815,19 @@ export class AnnotationLayer {
 		const topPt = box.ptY1 - Math.max(ann.anchor[1], ann.anchor[3]);
 		const bottomPt = box.ptY1 - Math.min(ann.anchor[1], ann.anchor[3]);
 
-		const mark = layer.createDiv("margin-notes-pdf-anchor-flash");
+		const mark = layer.createDiv(cls);
 		mark.setCssStyles({
 			left: `${box.left + ((left - box.ptX0) / box.ptWidth) * box.width}px`,
 			top: `${box.top + (topPt / box.ptHeight) * box.height}px`,
 			width: `${((right - left) / box.ptWidth) * box.width}px`,
 			height: `${((bottomPt - topPt) / box.ptHeight) * box.height}px`,
 		});
-		mark.scrollIntoView({ block: "center", behavior: "smooth" });
-		window.setTimeout(() => mark.remove(), 1600);
+		return mark;
 	}
 
 	destroy(): void {
 		window.clearTimeout(this.rebuildTimer);
+		this.hoverMark = null;
 		this.layer?.remove();
 		this.layer = null;
 	}

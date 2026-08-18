@@ -582,3 +582,49 @@ API)采样前 3 页算中文占比——**不开任何标签页,没有视觉闪�
 5. `revealAnnotation` 用固定 350ms 等 pdf.js 渲染完目标页,不稳;应该改成监听一次
    `pagerendered`
 6. 各页尺寸/旋转不一致的 PDF,轨道会左右跳(大多数 PDF 每页一致,真遇到再修)
+
+### v0.10.0 —— 轨道设置拆分左右 + 悬浮高亮原文位置
+
+用户反馈四件事,顺着查代码发现前三件其实是同一个根因:`railWidth`/`railGap` 从
+一开始就是**一对全局共享设置**,左右两条轨道读的是同一个数字——设置面板的说明文字
+写的是"改一条就是改这一侧的全部",代码却没照着做。于是调左边宽度,右边跟着变;
+调大左边的 gap,右边也跟着空出一截"留白";用户把这些症状描述成"很奇怪"完全合理。
+
+**实测过而非猜测**:跑了一遍插件实际的名字匹配逻辑对着 vault 里真实的 100 个 PDF,
+25 个候选里 23 个是假的(`hopfield-layers_gh` 示例仓库里同名图注 PDF、`.trash`/
+`zz_old` 里重复的 matplotlib 图标文件、甚至 70_research 论文堆里两份大小写不同的
+同一篇英文论文)——这是回答"为什么要指纹"那个追问时顺手做的验证,细节见上面
+v0.9.0 之前的讨论,这里不重复。
+
+**改动**:
+
+- `annotation-settings.ts`:`railWidth`/`railGap` 拆成 `railWidthLeft` /
+  `railWidthRight` / `railGapLeft` / `railGapRight`,各自独立。旧的单一值会在
+  加载时原样铺到左右两侧(不会让老用户的轨道突然跳一下)。
+- `annotation-layer.ts`:新增 `railWidthPt(settings, side)` / `railGapPt(settings, side)`
+  两个按侧取值的小helper,`layout()`、`attachRailResize()` 全部改用它们;
+  `createBox`/`attachResize` 不再需要把 `railWidthPt` 当参数一路传下去了。
+- `annotation-settings-tab.ts`:两个滑块变成"左侧轨道"/"右侧轨道"两组四个滑块。
+
+拖拽两条边的几何公式本身(内边动宽度、外边动 gap,外边固定不动)重新演算过一遍,
+数学上是对称、成立的——没找到左右不对称的独立 bug。如果拆开全局设置之后
+"左边轨道右边的边还是拖不动"依然复现,那是另一个问题,需要用户下次描述得更具体
+(比如是完全没反应,还是反应了但方向不对)才能继续查,这次没法在没有实时 UI 的
+情况下确认。
+
+**悬浮高亮原文位置**(用户的第一个诉求:"完全不知道原文在哪里")。之前只有点击
+列表面板的跳转按钮才会画高亮框(`reveal()`,一次性、带 1.6s 淡出动画、还会滚动
+视图)。现在拆出一对新方法 `beginHoverHighlight`/`endHoverHighlight`,复用同一套
+锚点几何计算(重构进 `drawAnchorMark` 私有方法),但**不滚动、不带定时消失**——
+鼠标移进移出即时开关,画一个新 CSS 类 `.margin-notes-pdf-anchor-hover`(纯 opacity,
+没有 keyframe 动画)。两处接入:
+
+- PDF 页面上的批注框本身(`createBox` 里 `mouseenter`/`mouseleave`)——对轨道里的
+  固定批注最有用,因为它离锚点原文本来就有一段距离。
+- 列表面板每一行(`annotation-list-view.ts` 的 `renderRow`)——通过控制器新增的
+  `peekAnnotation(ann)`/`clearPeek()`,内部找当前打开的 PDF 视图状态,静默失败
+  (锚点所在页没渲染在屏幕上就什么都不做,不会强行跳转)。
+
+`npx tsc -noEmit -skipLibCheck` 和 `npm run build` 都过。**没有测试覆盖**——
+悬浮高亮的位置计算复用了 `reveal()` 已经在用的公式,几何上应该一致,但没有实时
+UI 验证过实际观感(比如淡入是否够明显、轨道批注悬浮时高亮框会不会跳到屏幕外)。

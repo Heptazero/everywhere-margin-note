@@ -341,6 +341,18 @@
 	}
 }
 
+/* Hover variant: stays fully visible for as long as the pointer is over the
+   note/list-row, removed explicitly on mouseleave — NOT the flash's timed
+   fade-out, which would make a highlight vanish mid-hover on anything longer
+   than 1.6s. */
+.margin-notes-pdf-anchor-hover {
+	position: absolute;
+	pointer-events: none;
+	border-radius: 2px;
+	background: var(--interactive-accent);
+	opacity: 0.32;
+}
+
 /* ---- Annotation list panel ---- */
 
 /* Fill the pane with the main reading background — the sidebar's default

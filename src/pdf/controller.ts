@@ -255,6 +255,26 @@ export class PdfAnnotationsController {
 		return file ? this.store.counterpartOf(file.path) : null;
 	}
 
+	/**
+	 * List-panel hover feedback: highlights an annotation's source text without
+	 * jumping to it — unlike `revealAnnotation()`, this never opens a file or
+	 * scrolls, so it's cheap enough to fire on every row the pointer passes
+	 * over. Silently does nothing if the annotation's page isn't currently
+	 * rendered in the open PDF (e.g. the row is for a page scrolled out of view).
+	 */
+	peekAnnotation(ann: PdfAnnotation): void {
+		const view = this.targetPdfView();
+		const state = view ? this.states.get(view) : null;
+		const pageView = state?.pages.get(ann.page);
+		if (state && pageView) state.layer.beginHoverHighlight(pageView, ann);
+	}
+
+	clearPeek(): void {
+		const view = this.targetPdfView();
+		const state = view ? this.states.get(view) : null;
+		state?.layer.endHoverHighlight();
+	}
+
 	/** Names the specific check that stopped a pairing, so it can be acted on. */
 	private explainNoCounterpart(path: string): string {
 		const candidates = findNameCandidates(this.app, path);

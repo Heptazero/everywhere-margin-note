@@ -142,6 +142,8 @@ export class AnnotationListView extends ItemView {
 		});
 		handle.el.dataset.mode = ann.pinned ? "rail" : "free";
 		if (ann.color) handle.el.style.setProperty("--margin-notes-pdf-note-color", ann.color);
+		handle.el.addEventListener("mouseenter", () => this.controller.peekAnnotation(ann));
+		handle.el.addEventListener("mouseleave", () => this.controller.clearPeek());
 		void handle.render();
 	}
 }
