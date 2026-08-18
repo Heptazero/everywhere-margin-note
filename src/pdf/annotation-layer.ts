@@ -77,6 +77,18 @@ interface Rail {
 	zoom: number;
 }
 
+/** A leader line plus the knob on its text end, kept so both can be repositioned
+ * without a full rebuild while the note or the anchor is being dragged. */
+interface LeaderParts {
+	line: HTMLElement;
+	knob: HTMLElement;
+	noteEl: HTMLElement;
+	pageView: PDFPageView;
+	ann: PdfAnnotation;
+	/** Anchor box in scroll-container px; mutated live during an anchor drag. */
+	a: { x0: number; x1: number; y0: number; y1: number };
+}
+
 /** One rendered annotation, kept so geometry can be re-measured after rendering. */
 interface Placed {
 	ann: PdfAnnotation;
@@ -112,6 +124,14 @@ export class AnnotationLayer {
 	/** Anchor rects in scroll coords, for `both` mode's reverse hover test. */
 	private hitAreas: { ann: PdfAnnotation; el: HTMLElement; x0: number; x1: number; y0: number; y1: number }[] = [];
 	private hoveredAnchorId: string | null = null;
+	/** Permanent bands ("常亮"), by annotation id — hover reuses these instead of
+	 * drawing a second one on top (two translucent layers composite to roughly
+	 * double the configured opacity, which is why 常亮 looked far darker than the
+	 * hover highlight it is supposed to match). */
+	private bands = new Map<string, HTMLElement>();
+	/** Leader lines ("箭头"), by annotation id, so they can be redrawn live while
+	 * either end is being dragged rather than waiting for the debounced rebuild. */
+	private leaders = new Map<string, LeaderParts>();
 
 	constructor(
 		private app: App,
@@ -210,6 +230,8 @@ export class AnnotationLayer {
 		this.hoverMark = null;
 		this.hitAreas = [];
 		this.hoveredAnchorId = null;
+		this.bands.clear();
+		this.leaders.clear();
 
 		const built: Placed[] = [];
 		const pending: Promise<void>[] = [];
@@ -845,6 +867,7 @@ export class AnnotationLayer {
 		const onMove = (m: PointerEvent) => {
 			handle.el.style.top = `${startTop + (m.clientY - startY)}px`;
 			if (!ann.pinned) handle.el.style.left = `${startLeft + (m.clientX - startX)}px`;
+			this.refreshLeader(ann.id);
 		};
 		const onUp = (u: PointerEvent) => {
 			window.removeEventListener("pointermove", onMove);
@@ -1071,13 +1094,25 @@ export class AnnotationLayer {
 	 * rendered (e.g. hovering a list row for a page that's scrolled out of view).
 	 */
 	private hoverMark: HTMLElement | null = null;
+	private activeBand: HTMLElement | null = null;
 
 	beginHoverHighlight(pageView: PDFPageView, ann: PdfAnnotation): void {
 		this.endHoverHighlight();
+		// A band already covering this anchor is brightened in place. Drawing a
+		// second translucent rect over the first is what made 常亮 look much
+		// darker than 悬浮 — the two layers composited instead of matching.
+		const band = this.bands.get(ann.id);
+		if (band) {
+			band.addClass("is-active");
+			this.activeBand = band;
+			return;
+		}
 		this.hoverMark = this.drawAnchorMark(pageView, ann, "margin-notes-pdf-anchor-hover");
 	}
 
 	endHoverHighlight(): void {
+		this.activeBand?.removeClass("is-active");
+		this.activeBand = null;
 		this.hoverMark?.remove();
 		this.hoverMark = null;
 	}
@@ -1159,6 +1194,8 @@ export class AnnotationLayer {
 	 */
 	private renderModeDecorations(built: Placed[], settings: PdfAnnotationSettings, scroller: HTMLElement): void {
 		this.hitAreas = [];
+		this.bands.clear();
+		this.leaders.clear();
 		const layer = this.layer;
 		if (!layer) return;
 		const mode = settings.highlightMode;
@@ -1183,6 +1220,7 @@ export class AnnotationLayer {
 				const band = layer.createDiv("margin-notes-pdf-anchor-band");
 				band.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
 				band.setCssStyles({ left: `${x0}px`, top: `${y0}px`, width: `${x1 - x0}px`, height: `${y1 - y0}px` });
+				this.bands.set(ann.id, band);
 			} else if (mode === "line") {
 				this.drawLeader(layer, ann, el, { x0, x1, y0, y1 }, pageView);
 			}
@@ -1202,38 +1240,105 @@ export class AnnotationLayer {
 		a: { x0: number; x1: number; y0: number; y1: number },
 		pageView: PDFPageView
 	): void {
-		const noteLeft = parseFloat(el.style.left || "0");
-		const noteWidth = el.getBoundingClientRect().width;
-		const noteTop = parseFloat(el.style.top || "0");
-		const noteHeight = el.getBoundingClientRect().height;
+		const line = layer.createDiv("margin-notes-pdf-leader");
+		const knob = layer.createDiv("margin-notes-pdf-leader-knob");
+		for (const n of [line, knob]) n.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
+		knob.setAttribute("aria-label", "拖动这一端可以移动高亮的位置");
 
-		// Start from whichever side of the note faces the text.
-		const noteCentre = noteLeft + noteWidth / 2;
+		const parts: LeaderParts = { line, knob, noteEl: el, pageView, ann, a: { ...a } };
+		this.leaders.set(ann.id, parts);
+		this.positionLeader(parts);
+		knob.addEventListener("pointerdown", (ev) => this.beginAnchorDrag(ev, parts));
+	}
+
+	/**
+	 * Places (or replaces) a leader from the note's page-facing edge to the near
+	 * edge of its text, with the knob on the text end. Split out from drawLeader
+	 * so a drag can call it on every pointermove — the line used to be redrawn
+	 * only by the debounced rebuild, which is why it visibly lagged behind a note
+	 * being dragged.
+	 */
+	private positionLeader(p: LeaderParts): void {
+		const { line, knob, noteEl, a } = p;
+		const noteRect = noteEl.getBoundingClientRect();
+		const noteLeft = parseFloat(noteEl.style.left || "0");
+		const noteTop = parseFloat(noteEl.style.top || "0");
+
+		const noteCentre = noteLeft + noteRect.width / 2;
 		const textCentre = (a.x0 + a.x1) / 2;
-		const sx = noteCentre > textCentre ? noteLeft : noteLeft + noteWidth;
-		const sy = noteTop + noteHeight / 2;
+		const sx = noteCentre > textCentre ? noteLeft : noteLeft + noteRect.width;
+		const sy = noteTop + noteRect.height / 2;
 		const tx = noteCentre > textCentre ? a.x1 : a.x0;
 		const ty = (a.y0 + a.y1) / 2;
 
 		const dx = tx - sx;
 		const dy = ty - sy;
 		const len = Math.hypot(dx, dy);
-		if (len < 1) return;
-
-		const line = layer.createDiv("margin-notes-pdf-leader");
-		line.style.setProperty("--margin-notes-pdf-note-color", this.colorOf(ann));
 		line.setCssStyles({
 			left: `${sx}px`,
 			top: `${sy}px`,
-			width: `${len}px`,
+			width: `${Math.max(0, len)}px`,
 			transform: `rotate(${Math.atan2(dy, dx)}rad)`,
 			transformOrigin: "0 50%",
 		});
-		line.setAttribute("aria-label", "拖动这条线可以移动批注");
+		knob.setCssStyles({ left: `${tx}px`, top: `${ty}px` });
+	}
+
+	/** Keeps a note's leader glued to it while the note itself is being dragged. */
+	private refreshLeader(annId: string): void {
+		const p = this.leaders.get(annId);
+		if (p) this.positionLeader(p);
+	}
+
+	/**
+	 * Drags the arrow's TEXT end, which moves the highlighted region — not the
+	 * note. Grabbing the line to move the note was the wrong model: the note
+	 * already has a grip, and what has no other handle is the anchor.
+	 *
+	 * The whole anchor box is translated by the cursor delta, so a highlight that
+	 * landed on the wrong line can be nudged onto the right one. `quote` is
+	 * cleared on commit for the same reason `reanchor` clears it: once a human
+	 * has placed the box, a later quote re-resolution must not overwrite it.
+	 * (To re-pick a text span exactly, re-select the text and use 「重新指定高亮
+	 * 位置」 — dragging is for nudging, selection is for re-choosing.)
+	 */
+	private beginAnchorDrag(ev: PointerEvent, p: LeaderParts): void {
+		ev.preventDefault();
+		ev.stopPropagation();
 		const pdfPath = this.last?.pdfPath;
-		if (pdfPath) {
-			line.addEventListener("pointerdown", (ev) => this.beginNoteDrag(ev, el, pdfPath, ann, pageView));
-		}
+		const box = this.currentPageBox(p.pageView);
+		if (!pdfPath || !box) return;
+
+		const startX = ev.clientX;
+		const startY = ev.clientY;
+		const start = { ...p.a };
+		const startAnchor: PdfRect = [...p.ann.anchor];
+		p.knob.addClass("is-dragging");
+
+		const onMove = (m: PointerEvent) => {
+			const dx = m.clientX - startX;
+			const dy = m.clientY - startY;
+			p.a = { x0: start.x0 + dx, x1: start.x1 + dx, y0: start.y0 + dy, y1: start.y1 + dy };
+			this.positionLeader(p);
+		};
+		const onUp = (u: PointerEvent) => {
+			window.removeEventListener("pointermove", onMove);
+			p.knob.removeClass("is-dragging");
+			// px → PDF points. Y is inverted: PDF points grow upwards, screen down.
+			const dxPt = (u.clientX - startX) / box.zoom;
+			const dyPt = -(u.clientY - startY) / box.zoom;
+			this.mutate(pdfPath, p.ann, (ann) => {
+				ann.anchor = [
+					startAnchor[0] + dxPt,
+					startAnchor[1] + dyPt,
+					startAnchor[2] + dxPt,
+					startAnchor[3] + dyPt,
+				];
+				ann.quote = undefined;
+			});
+		};
+		window.addEventListener("pointermove", onMove);
+		window.addEventListener("pointerup", onUp, { once: true });
 	}
 
 	/**

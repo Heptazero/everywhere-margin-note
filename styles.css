@@ -544,22 +544,39 @@
 	height: 1px;
 	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
 	opacity: var(--margin-notes-pdf-highlight-opacity, 0.3);
-	/* Grabbable: press and drag the line to move the note it belongs to. */
+	/* The line itself is inert. It was briefly grabbable, but a pointer-active
+	   band running across the page swallows text selection — and selecting text
+	   is how notes get made. Only the knob below takes pointer input. */
+	pointer-events: none;
+}
+
+/* The arrow's text end: the handle for moving the HIGHLIGHT (the note has its
+   own grip). Small, but the only pointer-active part of the leader. */
+.margin-notes-pdf-leader-knob {
+	position: absolute;
+	width: 9px;
+	height: 9px;
+	margin: -4px 0 0 -4px;
+	border-radius: 50%;
 	pointer-events: auto;
 	cursor: grab;
+	background: var(--margin-notes-pdf-note-color, var(--interactive-accent));
+	box-shadow: 0 0 0 1.5px var(--background-primary);
+	opacity: 0.75;
 }
-.margin-notes-pdf-leader:hover {
+.margin-notes-pdf-leader-knob:hover,
+.margin-notes-pdf-leader-knob.is-dragging {
 	opacity: 1;
+	transform: scale(1.2);
 }
-.margin-notes-pdf-leader.is-dragging {
+.margin-notes-pdf-leader-knob.is-dragging {
 	cursor: grabbing;
-	opacity: 1;
 }
-/* A 1px line is far too thin to hit reliably, so widen only the hit area. */
-.margin-notes-pdf-leader::before {
-	content: "";
-	position: absolute;
-	inset: -5px 0;
+
+/* Hover brightening of an existing permanent band — a class on the band itself,
+   never a second element stacked over it. */
+.margin-notes-pdf-anchor-band.is-active {
+	opacity: calc(var(--margin-notes-pdf-highlight-opacity, 0.3) * 1.6);
 }
 
 /* `both`: the note lit up because the pointer is over its TEXT (the reverse of
