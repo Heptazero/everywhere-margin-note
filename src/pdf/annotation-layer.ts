@@ -54,6 +54,13 @@ const REBUILD_DEBOUNCE_MS = 60;
 const REANCHOR_HINT_PX = 24;
 /** Movement below this keeps a press a click rather than a drag. */
 const TAP_SLOP_PX = 4;
+/**
+ * The page width every size setting is expressed against, in points — US Letter,
+ * which is what essentially every paper this is used on declares. A file with a
+ * different media box is normalised to it (see PageBox.unit), so "rail width
+ * 220" means the same fraction of the page in every document.
+ */
+const REFERENCE_PAGE_WIDTH_PT = 612;
 
 /** Page geometry in scroll-container coordinates, plus the pt→px zoom factor. */
 interface PageBox {
@@ -68,9 +75,25 @@ interface PageBox {
 	ptY0: number;
 	ptY1: number;
 	ptHeight: number;
-	/** Rendered px per PDF point — everything scales by this so notes stay
-	 * attached to the page (size included) as pdf.js zooms in/out. */
-	zoom: number;
+	/**
+	 * Rendered px per *reference* point — the factor every piece of note chrome
+	 * (rail width, gap, font size, manual nudges) is sized by instead of `zoom`.
+	 *
+	 * `zoom` alone was wrong across documents. A PDF point is not a fixed
+	 * physical size: it is whatever the file's media box says, and old scanned
+	 * papers routinely declare a page a fraction of the usual size. Such a page
+	 * has to be rendered at a much larger `zoom` to fill the same width on
+	 * screen — so anything sized in that document's points came out enormous,
+	 * which is exactly the "低分辨率老 PDF 上组件和字体特别大" report.
+	 *
+	 * Normalising by page width makes a setting mean the same *proportion of the
+	 * page* everywhere: a 220 rail is 220/612 of the page's width whether the
+	 * file calls that 612 points or 306. Absolute screen px would have been the
+	 * other candidate and is worse — it re-breaks what v0.11.0 fixed, with notes
+	 * no longer keeping their size relative to the text they annotate as you
+	 * zoom.
+	 */
+	unit: number;
 }
 
 interface Rail {
@@ -78,9 +101,9 @@ interface Rail {
 	top: number;
 	height: number;
 	el: HTMLElement;
-	/** The page's zoom at push time, so the minimum gap between notes (below)
-	 * can scale with it instead of staying a fixed px amount at every zoom. */
-	zoom: number;
+	/** The page's chrome unit at push time, so the minimum gap between notes
+	 * scales with it instead of staying a fixed px amount at every zoom. */
+	unit: number;
 }
 
 /** A leader line plus the knob on its text end, kept so both can be repositioned
@@ -211,7 +234,10 @@ export class AnnotationLayer {
 			ptY0,
 			ptY1,
 			ptHeight,
-			zoom: ptHeight > 0 ? r.height / ptHeight : 1,
+			// Anchor coordinates reach the screen as plain ratios of the page box
+			// (see anchorTop / drawAnchorMark), so no px-per-point factor is needed
+			// for them; `unit` is only for chrome.
+			unit: r.width > 0 ? r.width / REFERENCE_PAGE_WIDTH_PT : 1,
 		};
 	}
 
@@ -333,15 +359,15 @@ export class AnnotationLayer {
 
 			if (ann.pinned) {
 				const widthPt = this.railWidthPt(settings, ann.side);
-				const left = this.railLeft(ann.side, box, widthPt * box.zoom, this.railGapPt(settings, ann.side) * box.zoom);
+				const left = this.railLeft(ann.side, box, widthPt * box.unit, this.railGapPt(settings, ann.side) * box.unit);
 				el.style.left = `${left}px`;
 				if (!ann.collapsed) {
 					this.scaleBox(el, widthPt, undefined, settings, ann, box);
-					maxRight = Math.max(maxRight, left + widthPt * box.zoom);
+					maxRight = Math.max(maxRight, left + widthPt * box.unit);
 				} else {
 					maxRight = Math.max(maxRight, left + DOT_SIZE_PX);
 				}
-				rails[ann.side].push({ id: ann.id, top: this.anchorTop(rect, ann, box), height: 0, el, zoom: box.zoom });
+				rails[ann.side].push({ id: ann.id, top: this.anchorTop(rect, ann, box), height: 0, el, unit: box.unit });
 			} else if (ann.collapsed) {
 				const left = reachableX(box.left + (this.freeXPct(rect, ann, box) / 100) * box.width);
 				el.style.left = `${left}px`;
@@ -357,12 +383,12 @@ export class AnnotationLayer {
 			// offsetHeight is the element's UNSCALED layout height (transforms don't
 			// affect it), so it has to be multiplied back up to compare against the
 			// scroll-container coordinates the tops are in.
-			for (const r of group) r.height = r.el.offsetHeight * r.zoom;
+			for (const r of group) r.height = r.el.offsetHeight * r.unit;
 			// MIN_GAP is a page-point constant like everything else here — a fixed
 			// px value would look cramped zoomed in and oversized zoomed out. All
 			// notes in one rail share the document's zoom in practice, so the
 			// first entry's is representative.
-			const gapPx = MIN_GAP * (group[0]?.zoom ?? 1);
+			const gapPx = MIN_GAP * (group[0]?.unit ?? 1);
 			for (const r of resolveCollisions(group, gapPx)) r.el.style.top = `${r.top}px`;
 		}
 
@@ -411,9 +437,9 @@ export class AnnotationLayer {
 
 		const page = built.find((b) => b.pageView.div.isConnected && b.pageView.pdfPage?.view)?.pageView;
 		if (!page) return 0;
-		const zoom = this.pageBox(page, scroller, scroller.getBoundingClientRect()).zoom;
+		const unit = this.pageBox(page, scroller, scroller.getBoundingClientRect()).unit;
 
-		const needed = (this.railWidthPt(settings, "left") + this.railGapPt(settings, "left")) * zoom;
+		const needed = (this.railWidthPt(settings, "left") + this.railGapPt(settings, "left")) * unit;
 		return Math.max(0, needed + OUTER_MARGIN_PX);
 	}
 
@@ -460,7 +486,7 @@ export class AnnotationLayer {
 	/**
 	 * Vertical position derived from the anchor (plus any manual nudge).
 	 * `offsetY` is stored in PDF points, like `anchor` itself — converting it to
-	 * px here (× `box.zoom`) rather than storing raw px is what keeps a manually
+	 * px here (× `box.unit`) rather than storing raw px is what keeps a manually
 	 * reordered rail note's position relative to its neighbours stable across
 	 * zoom. It used to be stored as raw px: fine at the zoom it was dragged at,
 	 * but frozen afterwards while every neighbour's own position kept scaling —
@@ -468,7 +494,7 @@ export class AnnotationLayer {
 	 */
 	private anchorTop(rect: PdfRect, ann: PdfAnnotation, box: PageBox): number {
 		const topPt = box.ptY1 - Math.max(rect[1], rect[3]);
-		return box.top + (topPt / box.ptHeight) * box.height + (ann.offsetY ?? 0) * box.zoom;
+		return box.top + (topPt / box.ptHeight) * box.height + (ann.offsetY ?? 0) * box.unit;
 	}
 
 	/**
@@ -490,7 +516,7 @@ export class AnnotationLayer {
 		el.style.height = heightPt ? `${heightPt}px` : "";
 		el.style.fontSize = `${settings.fontSize * (ann.fontScale ?? 1)}px`;
 		el.style.transformOrigin = "top left";
-		el.style.transform = `scale(${box.zoom})`;
+		el.style.transform = `scale(${box.unit})`;
 	}
 
 	/**
@@ -529,7 +555,7 @@ export class AnnotationLayer {
 		// units by dividing out the zoom the transform is about to re-apply.
 		const widthPx = ((ann.freeW ?? DEFAULT_FREE_WIDTH_PCT) / 100) * box.width;
 		const heightPx = ann.freeH ? (ann.freeH / 100) * box.height : undefined;
-		this.scaleBox(el, widthPx / box.zoom, heightPx ? heightPx / box.zoom : undefined, settings, ann, box);
+		this.scaleBox(el, widthPx / box.unit, heightPx ? heightPx / box.unit : undefined, settings, ann, box);
 		return left + widthPx;
 	}
 
@@ -689,7 +715,7 @@ export class AnnotationLayer {
 				const top = parseFloat(el.style.top || "0");
 				// offsetWidth is unscaled (the zoom lives in the transform), so it
 				// has to be scaled up before being expressed as a page percentage.
-				const widthPx = el.offsetWidth * box.zoom;
+				const widthPx = el.offsetWidth * box.unit;
 				this.mutate(pdfPath, ann, (a) => {
 					a.pinned = false;
 					a.freeX = ((left - box.left) / box.width) * 100;
@@ -876,7 +902,7 @@ export class AnnotationLayer {
 					// zoom, which is what could reorder/bunch up a rail after
 					// zooming. See anchorTop(). Falls back to raw px only in the
 					// edge case where the page isn't measurable right now.
-					a.offsetY = (a.offsetY ?? 0) + (box ? dy / box.zoom : dy);
+					a.offsetY = (a.offsetY ?? 0) + (box ? dy / box.unit : dy);
 				} else if (box) {
 					a.freeX = ((startLeft + dx - box.left) / box.width) * 100;
 					a.freeY = ((startTop + dy - box.top) / box.height) * 100;
@@ -951,7 +977,7 @@ export class AnnotationLayer {
 			handle.el.addClass("is-dragging");
 
 			const solve = (x: number) => {
-				const dx = ((x - startX) * sign) / box.zoom;
+				const dx = ((x - startX) * sign) / box.unit;
 				// Inner edge: width grows as the edge moves toward the page, and the
 				// gap shrinks by the same amount so the outer edge stays put.
 				// Outer edge: width alone, gap untouched.
@@ -963,7 +989,7 @@ export class AnnotationLayer {
 			const onMove = (m: PointerEvent) => {
 				const { width, gap } = solve(m.clientX);
 				handle.el.style.width = `${width}px`;
-				handle.el.style.left = `${this.railLeft(ann.side, box, width * box.zoom, gap * box.zoom)}px`;
+				handle.el.style.left = `${this.railLeft(ann.side, box, width * box.unit, gap * box.unit)}px`;
 			};
 			const onUp = (u: PointerEvent) => {
 				window.removeEventListener("pointermove", onMove);
@@ -1009,7 +1035,7 @@ export class AnnotationLayer {
 			const startW = handle.el.offsetWidth;
 			const startH = handle.el.offsetHeight;
 			const startLeft = parseFloat(handle.el.style.left || "0");
-			const zoom = this.currentPageBox(pageView)?.zoom ?? 1;
+			const zoom = this.currentPageBox(pageView)?.unit ?? 1;
 			const grabsLeft = edge === "left";
 			handle.el.addClass("is-dragging");
 
