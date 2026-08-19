@@ -612,6 +612,34 @@ export class PdfAnnotationsController {
 		}
 	}
 
+	/**
+	 * Undo/redo keys, listening on THIS PDF view's own element.
+	 *
+	 * They were previously registered as commands with default `Mod+Z` hotkeys.
+	 * That is a global registration: it puts an entry in Obsidian's hotkey table
+	 * for a chord the editor also uses, and even with a checkCallback that
+	 * declines outside a PDF, ordinary text undo in Markdown stopped working —
+	 * the keystroke was being consumed before it ever reached the editor. A
+	 * listener bound to the PDF view's element cannot have that effect on
+	 * anything else, because events elsewhere never reach it. The commands are
+	 * still in the palette, just with no default hotkey of their own.
+	 *
+	 * Typing inside a note still wins: while a contentEditable/input has focus
+	 * this bows out so the field's own undo runs.
+	 */
+	private attachUndoKeys(view: FileView, component: Component): void {
+		component.registerDomEvent(view.containerEl, "keydown", (ev: KeyboardEvent) => {
+			if (ev.key.toLowerCase() !== "z" || !(ev.metaKey || ev.ctrlKey) || ev.altKey) return;
+			const el = document.activeElement as HTMLElement | null;
+			if (el && (el.isContentEditable || el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+			if (ev.shiftKey ? !this.store.canRedo : !this.store.canUndo) return;
+			ev.preventDefault();
+			ev.stopPropagation();
+			if (ev.shiftKey) this.redo();
+			else this.undo();
+		});
+	}
+
 	private attachPageHandlers(view: FileView): void {
 		const component = new Component();
 		this.plugin.addChild(component);
@@ -643,6 +671,7 @@ export class PdfAnnotationsController {
 		const state: ViewState = { pages, layer, currentPath, sampler: new ScriptSampler() };
 		this.states.set(view, state);
 		component.register(() => layer.destroy());
+		this.attachUndoKeys(view, component);
 
 		const trackedPageDivs = new WeakSet<HTMLDivElement>();
 

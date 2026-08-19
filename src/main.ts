@@ -29,14 +29,16 @@ export default class MarginNotesPlugin extends Plugin {
 		this.addPdfNoteCommand("pdf-add-note-left", "[PDF] 加批注:左侧轨道", { pinned: true, side: "left", collapsed: false });
 		this.addPdfNoteCommand("pdf-add-note-free", "[PDF] 加批注:自由摆放(便利贴)", { pinned: false, side: "right", collapsed: false });
 
-		// Bound to the system undo/redo keys, but claimed only when nothing else
-		// has a better claim on them — see `annotationUndoAvailable`.
+		// Deliberately NO default hotkey: Cmd+Z is handled by a listener on the PDF
+		// view itself (controller.attachUndoKeys), which cannot interfere with the
+		// editor. Declaring it here put an entry in the global hotkey table for a
+		// chord the editor needs, and broke undo in Markdown even though the
+		// checkCallback declined there.
 		this.addCommand({
 			id: "pdf-undo",
 			name: "[PDF] 撤销批注修改",
-			hotkeys: [{ modifiers: ["Mod"], key: "z" }],
 			checkCallback: (checking) => {
-				const can = this.annotationUndoAvailable() && this.pdfAnnotations.store.canUndo;
+				const can = this.pdfAnnotations.hasActivePDFView() && this.pdfAnnotations.store.canUndo;
 				if (!checking && can) this.pdfAnnotations.undo();
 				return can;
 			},
@@ -45,9 +47,8 @@ export default class MarginNotesPlugin extends Plugin {
 		this.addCommand({
 			id: "pdf-redo",
 			name: "[PDF] 重做批注修改",
-			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "z" }],
 			checkCallback: (checking) => {
-				const can = this.annotationUndoAvailable() && this.pdfAnnotations.store.canRedo;
+				const can = this.pdfAnnotations.hasActivePDFView() && this.pdfAnnotations.store.canRedo;
 				if (!checking && can) this.pdfAnnotations.redo();
 				return can;
 			},
@@ -108,23 +109,6 @@ export default class MarginNotesPlugin extends Plugin {
 			callback: () => void this.openAnnotationList(),
 		});
 		this.addRibbonIcon("message-square", "PDF 批注列表", () => void this.openAnnotationList());
-	}
-
-	/**
-	 * Whether Cmd+Z should mean "undo an annotation change" right now.
-	 *
-	 * Requires a PDF view AND that the user is not typing. While a note's text is
-	 * being edited the PDF view is still the active view, so without the second
-	 * check this command swallowed Cmd+Z during editing and ordinary text undo
-	 * stopped working — the keystroke never reached the field the caret was in.
-	 * Text editing wins: undoing what you are typing is the more immediate
-	 * meaning, and the annotation history is still reachable from the palette.
-	 */
-	private annotationUndoAvailable(): boolean {
-		if (!this.pdfAnnotations.hasActivePDFView()) return false;
-		const el = document.activeElement as HTMLElement | null;
-		if (!el) return true;
-		return !(el.isContentEditable || el.tagName === "INPUT" || el.tagName === "TEXTAREA");
 	}
 
 	private addPdfNoteCommand(id: string, name: string, form: NewNoteForm): void {
