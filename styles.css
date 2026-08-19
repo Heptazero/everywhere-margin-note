@@ -152,34 +152,30 @@
 	box-shadow: 0 0 0 1px var(--background-modifier-border);
 	border-radius: 3px;
 }
-/* Plain notes are meant to be minimal — don't permanently reserve toolbar
-   space; the hover-revealed "⋯" can sit over the last couple of characters. */
-.margin-notes-pdf-note[data-style="plain"] .margin-notes-pdf-body {
-	padding-top: 0;
-}
 
-/* Toolbar sits INSIDE the top-right corner, hover-revealed, so it is never
-   clipped by the box's own overflow. On-page notes collapse everything into
-   one "⋯" trigger (see annotation-layer.ts) — a row of 6+ icons covered short
-   notes' text entirely; the list panel's rows pass their own 2 actions
-   straight through since there's no crowding problem there. */
+/* Top-right corner, hover-revealed. An on-page note carries exactly ONE control
+   (drag to move, click for the menu — see annotation-layer.ts) and NO backplate:
+   a row of icons needs an opaque background to stay readable over text, and that
+   background sat on top of the note's first line. One small mark needs no plate,
+   so nothing covers the text. The list panel's rows still pass their own actions
+   through — there is no text underneath them to protect. */
 .margin-notes-pdf-toolbar {
 	position: absolute;
-	top: 2px;
-	right: 3px;
+	top: 1px;
+	right: 2px;
 	display: flex;
-	/* The note is overflow:hidden, so a toolbar wider than the note would have
-	   its leftmost icons silently cut off. Wrapping keeps every icon reachable
-	   on a narrow note instead of quietly losing them. */
-	max-width: calc(100% - 6px);
+	max-width: calc(100% - 4px);
 	flex-wrap: wrap;
 	justify-content: flex-end;
 	gap: 0;
 	opacity: 0;
 	transition: opacity 0.1s;
 	z-index: 1;
-	background: var(--background-primary);
 	border-radius: 3px;
+}
+/* The panel's rows keep a plate: several icons, and nothing behind them. */
+.margin-notes-pdf-list-row .margin-notes-pdf-toolbar {
+	background: var(--background-primary);
 }
 .margin-notes-pdf-note:hover .margin-notes-pdf-toolbar,
 .margin-notes-pdf-note.is-editing .margin-notes-pdf-toolbar,
@@ -214,16 +210,26 @@
 	color: var(--text-on-accent);
 }
 
+/* The note's single control. Deliberately small and only visible on hover, since
+   it sits directly over the text with nothing behind it. Its own translucent
+   pill appears only while hovered, so it stays legible when it matters without
+   masking anything when it doesn't. */
 .margin-notes-pdf-grip {
+	width: 14px;
+	height: 13px;
 	cursor: grab;
+	border-radius: 3px;
 	background: repeating-linear-gradient(
 		to bottom,
-		var(--text-faint) 0 1px,
+		var(--text-muted) 0 1px,
 		transparent 1px 3px
 	);
 	background-size: 9px 100%;
 	background-repeat: no-repeat;
 	background-position: center;
+}
+.margin-notes-pdf-grip:hover {
+	background-color: var(--background-modifier-hover);
 }
 .margin-notes-pdf-note.is-dragging .margin-notes-pdf-grip {
 	cursor: grabbing;
@@ -279,17 +285,14 @@
 }
 
 /* Render/edit surface. Rendered Markdown normally; plain source while editing. */
-/* The toolbar is cleared VERTICALLY, not horizontally: every line uses the full
-   width of the box and the text simply starts below the toolbar's row.
-   Reserving horizontal room instead — first as `padding-right: 34px` on every
-   line, then as a first-line float — always cost width, which is the scarcest
-   thing a narrow margin note has. Trading ~15px of height once per note for the
-   full text column on every line is the better deal, and it can never collide
-   with the top-right corner no matter how narrow the note gets. */
+/* No reserved space in either direction any more. Horizontal padding cost width
+   on every line; vertical padding cost a blank band at the top of every note.
+   Both were there to keep a multi-icon toolbar off the text — with a single
+   hover-revealed mark there is nothing to make room for, so the text starts at
+   the very top-left where it should. */
 .margin-notes-pdf-body {
 	cursor: text;
 	outline: none;
-	padding-top: 15px;
 }
 .margin-notes-pdf-note.is-editing .margin-notes-pdf-body {
 	white-space: pre-wrap;

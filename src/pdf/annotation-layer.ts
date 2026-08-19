@@ -52,6 +52,8 @@ const REBUILD_DEBOUNCE_MS = 60;
 /** How far OUTSIDE the highlight the pointer has to stray before it is worth
  * explaining that the arrow cannot leave it. Below this it reads as a slip. */
 const REANCHOR_HINT_PX = 24;
+/** Movement below this keeps a press a click rather than a drag. */
+const TAP_SLOP_PX = 4;
 
 /** Page geometry in scroll-container coordinates, plus the pt→px zoom factor. */
 interface PageBox {
@@ -613,37 +615,12 @@ export class AnnotationLayer {
 			sourcePath: pdfPath,
 			initialText: ann.text,
 			onCommit: (text) => this.mutate(pdfPath, ann, (a) => (a.text = text)),
-			// The body now starts below the toolbar's row rather than beside it, so
-			// icons no longer cost text width and the most-used few can live here
-			// again instead of behind the "⋯". Everything is still in the menu too.
-			actions: [
-				{
-					icon: "a-arrow-down",
-					title: "字号调小",
-					onClick: () => this.scaleFont(pdfPath, ann, -0.15),
-				},
-				{
-					icon: "a-arrow-up",
-					title: "字号调大",
-					onClick: () => this.scaleFont(pdfPath, ann, 0.15),
-				},
-				{
-					icon: "circle",
-					cls: "margin-notes-pdf-swatch",
-					title: "更改颜色",
-					onClick: (ev) => this.pickColor(pdfPath, ann, { x: ev.clientX, y: ev.clientY }),
-				},
-				{
-					icon: "square",
-					title: "切换有无边框",
-					onClick: () => this.mutate(pdfPath, ann, (a) => (a.style = a.style === "plain" ? "boxed" : "plain")),
-				},
-				{
-					icon: "more-horizontal",
-					title: "更多(固定/收起、移动、重设高亮、删除…)",
-					onClick: (ev) => this.openMenu(pdfPath, ann, { x: ev.clientX, y: ev.clientY }),
-				},
-			],
+			// No icon row: the note carries ONE control (see attachDrag), which is
+			// both the drag handle and the menu trigger. A row of icons needs a
+			// solid backplate to stay legible over text, and that plate covered the
+			// first line — the thing the note is mostly made of. Everything the
+			// icons did is still in the menu.
+			actions: [],
 		});
 
 		handle.el.dataset.annotationId = ann.id;
@@ -836,12 +813,12 @@ export class AnnotationLayer {
 	 * stores page-relative percentages, so it keeps its spot across zoom.
 	 */
 	private attachDrag(handle: AnnotationBoxHandle, pdfPath: string, ann: PdfAnnotation, pageView: PDFPageView): void {
-		// Appended, not prepended: the grip belongs in the corner itself, which is
-		// the last slot in a right-aligned toolbar, not the first.
 		const grip = handle.toolbarEl.createDiv({ cls: "margin-notes-pdf-grip" });
-		grip.setAttribute("aria-label", ann.pinned ? "上下拖动" : "拖动摆放");
+		grip.setAttribute("aria-label", ann.pinned ? "拖动上下移动,点击打开菜单" : "拖动摆放,点击打开菜单");
 
-		grip.addEventListener("pointerdown", (ev) => this.beginNoteDrag(ev, handle.el, pdfPath, ann, pageView));
+		grip.addEventListener("pointerdown", (ev) =>
+			this.beginNoteDrag(ev, handle.el, pdfPath, ann, pageView, (at) => this.openMenu(pdfPath, ann, at))
+		);
 	}
 
 	/**
@@ -854,18 +831,28 @@ export class AnnotationLayer {
 		el: HTMLElement,
 		pdfPath: string,
 		ann: PdfAnnotation,
-		pageView: PDFPageView
+		pageView: PDFPageView,
+		/** Called instead of committing a move when the gesture never became a
+		 * drag — which is what lets one control be both handle and button: press
+		 * and move to reposition, press and release to open the menu. */
+		onTap?: (at: { x: number; y: number }) => void
 	): void {
 		ev.preventDefault();
 		ev.stopPropagation();
 		const handle = { el };
+		let moved = false;
 		const startX = ev.clientX;
 		const startY = ev.clientY;
 		const startLeft = parseFloat(handle.el.style.left || "0");
 		const startTop = parseFloat(handle.el.style.top || "0");
-		handle.el.addClass("is-dragging");
 
 		const onMove = (m: PointerEvent) => {
+			if (!moved && Math.hypot(m.clientX - startX, m.clientY - startY) < TAP_SLOP_PX) return;
+			// Only past the slop does this count as a drag. Below it, the press is a
+			// click with an unsteady hand — treating that as a 1px move would both
+			// swallow the menu and write a pointless undo entry.
+			moved = true;
+			handle.el.addClass("is-dragging");
 			handle.el.style.top = `${startTop + (m.clientY - startY)}px`;
 			if (!ann.pinned) handle.el.style.left = `${startLeft + (m.clientX - startX)}px`;
 			this.refreshLeader(ann.id);
@@ -873,6 +860,10 @@ export class AnnotationLayer {
 		const onUp = (u: PointerEvent) => {
 			window.removeEventListener("pointermove", onMove);
 			handle.el.removeClass("is-dragging");
+			if (!moved) {
+				onTap?.({ x: u.clientX, y: u.clientY });
+				return;
+			}
 			const dx = u.clientX - startX;
 			const dy = u.clientY - startY;
 			// Measured now, not at build time: a zoom may have happened since.
