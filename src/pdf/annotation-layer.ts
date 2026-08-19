@@ -517,6 +517,13 @@ export class AnnotationLayer {
 		el.style.fontSize = `${settings.fontSize * (ann.fontScale ?? 1)}px`;
 		el.style.transformOrigin = "top left";
 		el.style.transform = `scale(${box.unit})`;
+		// The whole box is scaled, which is right for text and spacing but wrong
+		// for the hairlines: a 1px rule multiplied by the zoom stops being a
+		// hairline and turns into a heavy slab (a 2px spine at 3x reads as 6px).
+		// Rules are device-pixel furniture, not content, so styles.css divides
+		// them by this to cancel the transform out and keep them ~1px on screen
+		// at every zoom level.
+		el.style.setProperty("--margin-notes-pdf-inv", String(box.unit > 0 ? 1 / box.unit : 1));
 	}
 
 	/**

@@ -108,7 +108,7 @@
 	overflow: hidden;
 	pointer-events: auto;
 	opacity: var(--margin-notes-pdf-opacity, 0.92);
-	box-shadow: 0 0 0 1px var(--background-modifier-border);
+	box-shadow: 0 0 0 calc(1px * var(--margin-notes-pdf-inv, 1)) var(--background-modifier-border);
 }
 .margin-notes-pdf-note:hover,
 .margin-notes-pdf-note.is-editing,
@@ -125,14 +125,17 @@
    (--margin-notes-pdf-note-color, set inline by annotation-layer.ts) wins over
    the global rail/free setting when present. */
 .margin-notes-pdf-note[data-mode="rail"][data-side="right"] {
-	border-left: 2px solid var(--margin-notes-pdf-note-color, var(--margin-notes-pdf-rail-color, var(--interactive-accent)));
+	border-left: calc(2px * var(--margin-notes-pdf-inv, 1)) solid
+		var(--margin-notes-pdf-note-color, var(--margin-notes-pdf-rail-color, var(--interactive-accent)));
 }
 .margin-notes-pdf-note[data-mode="rail"][data-side="left"] {
-	border-right: 2px solid var(--margin-notes-pdf-note-color, var(--margin-notes-pdf-rail-color, var(--interactive-accent)));
+	border-right: calc(2px * var(--margin-notes-pdf-inv, 1)) solid
+		var(--margin-notes-pdf-note-color, var(--margin-notes-pdf-rail-color, var(--interactive-accent)));
 }
 /* Free notes read as a sticky note: full outline, slight lift. */
 .margin-notes-pdf-note[data-mode="free"] {
-	border: 1px solid var(--margin-notes-pdf-note-color, var(--margin-notes-pdf-free-color, var(--interactive-accent)));
+	border: calc(1px * var(--margin-notes-pdf-inv, 1)) solid
+		var(--margin-notes-pdf-note-color, var(--margin-notes-pdf-free-color, var(--interactive-accent)));
 	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
 }
 
@@ -215,16 +218,20 @@
    pill appears only while hovered, so it stays legible when it matters without
    masking anything when it doesn't. */
 .margin-notes-pdf-grip {
-	width: 14px;
-	height: 13px;
+	width: 11px;
+	height: 11px;
 	cursor: grab;
 	border-radius: 3px;
+	/* Exactly three rules: the gradient period is 3px and the painted band is
+	   capped at 9px tall (3 x 3px), rather than left to fill the element and
+	   produce however many lines happen to fit. Each rule is a hairline for the
+	   same reason the borders are — see --margin-notes-pdf-inv. */
 	background: repeating-linear-gradient(
 		to bottom,
-		var(--text-muted) 0 1px,
-		transparent 1px 3px
+		var(--text-muted) 0 calc(1px * var(--margin-notes-pdf-inv, 1)),
+		transparent calc(1px * var(--margin-notes-pdf-inv, 1)) 3px
 	);
-	background-size: 9px 100%;
+	background-size: 7px 9px;
 	background-repeat: no-repeat;
 	background-position: center;
 }
@@ -591,7 +598,8 @@
 .margin-notes-pdf-note.is-linked {
 	opacity: 1;
 	z-index: 2;
-	box-shadow: 0 0 0 2px var(--margin-notes-pdf-note-color-deep, var(--margin-notes-pdf-note-color, var(--interactive-accent)));
+	box-shadow: 0 0 0 calc(2px * var(--margin-notes-pdf-inv, 1))
+		var(--margin-notes-pdf-note-color-deep, var(--margin-notes-pdf-note-color, var(--interactive-accent)));
 }
 
 /* The toolbar's colour button shows the note's actual colour rather than the
