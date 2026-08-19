@@ -211,7 +211,14 @@ export class PdfAnnotationsController {
 	reanchor(pdfPath: string, ann: PdfAnnotation): void {
 		const sel = anchorFromActiveSelection();
 		if (sel) {
-			this.applyReanchor(pdfPath, ann.id, sel.pageNumber, sel.rect);
+			// Selected TEXT carries something a dragged box never can: the words
+			// themselves. Storing them as `quote` is what lets this highlight be
+			// re-found — on a re-flowed render, and above all on the other member
+			// of a translation pair, where the coordinates transfer but only if
+			// something can still identify the passage. A box has no such handle,
+			// so it stays coordinates-only.
+			const text = window.getSelection()?.toString().trim();
+			this.applyReanchor(pdfPath, ann.id, sel.pageNumber, sel.rect, text || undefined);
 			return;
 		}
 		this.pendingReanchor = { pdfPath, id: ann.id };
@@ -219,15 +226,19 @@ export class PdfAnnotationsController {
 		new Notice("在 PDF 上选中文字或拖一个框,重新指定这条批注指向的位置");
 	}
 
-	private applyReanchor(pdfPath: string, id: string, pageNumber: number, rect: PdfRect): void {
+	private applyReanchor(pdfPath: string, id: string, pageNumber: number, rect: PdfRect, quote?: string): void {
 		const ann = this.store.forFile(pdfPath).find((a) => a.id === id);
 		if (!ann) return;
 		ann.page = pageNumber;
 		ann.anchor = rect;
-		ann.quote = undefined;
+		// Either way the old quote must go: it described the previous passage, and
+		// leaving it would let a later re-resolution drag the highlight back.
+		ann.quote = quote;
+		// The arrow's attachment point was a fraction of the OLD box.
+		ann.leaderAt = undefined;
 		ann.updatedAt = Date.now();
 		this.store.upsert(pdfPath, ann);
-		new Notice("已更新这条批注的高亮位置");
+		new Notice(quote ? "已更新高亮位置(记住了选中的文字,可跨译文/原文定位)" : "已更新这条批注的高亮位置");
 	}
 
 	/**
@@ -416,6 +427,38 @@ export class PdfAnnotationsController {
 	 *      instead of a hard flash of blank/re-laid-out content.
 	 *   2. Landing on the matched position is an animated scroll, not a jump.
 	 */
+	/**
+	 * Opens the paired document beside this one instead of replacing it, for
+	 * reading the translation and the original side by side. `switchToCounterpart`
+	 * swaps in place and keeps the reading position; this keeps both on screen,
+	 * which is the other thing you want a pair for.
+	 *
+	 * Reuses an existing split already showing the counterpart rather than
+	 * stacking a second copy of the same file every time it is run.
+	 */
+	async openCounterpartInSplit(): Promise<void> {
+		const file = this.currentPdfTarget();
+		if (!file) return;
+		const other = this.store.counterpartOf(file.path);
+		if (!other) {
+			this.explainNoCounterpart(file.path);
+			return;
+		}
+		const target = this.app.vault.getAbstractFileByPath(other);
+		if (!(target instanceof TFile)) {
+			new Notice(`找不到配对的文件:${other}`);
+			return;
+		}
+		const existing = this.app.workspace
+			.getLeavesOfType("pdf")
+			.find((l) => (l.view as FileView).file?.path === other);
+		if (existing) {
+			this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		await this.app.workspace.getLeaf("split").openFile(target);
+	}
+
 	async switchToCounterpart(): Promise<void> {
 		const view = this.targetPdfView();
 		const file = this.currentPdfTarget();
